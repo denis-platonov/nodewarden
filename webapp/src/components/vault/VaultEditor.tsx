@@ -26,6 +26,8 @@ interface VaultEditorProps {
   isCreating: boolean;
   busy: boolean;
   folders: Folder[];
+  organizations: Array<{ id: string; name: string }>;
+  collectionsByOrg: Record<string, Array<{ id: string; name: string }>>;
   selectedCipher: Cipher | null;
   editExistingAttachments: Array<any>;
   removedAttachmentIds: Record<string, boolean>;
@@ -385,6 +387,45 @@ export default function VaultEditor(props: VaultEditorProps) {
               ))}
             </select>
           </label>
+          {props.organizations.length > 0 ? (
+            <>
+              <label className="field">
+                <span>{t('txt_organization')}</span>
+                <select
+                  className="input"
+                  value={props.draft.organizationId || ''}
+                  onInput={(e) => {
+                    const organizationId = (e.currentTarget as HTMLSelectElement).value;
+                    props.onUpdateDraft({ organizationId: organizationId || null, collectionIds: [], folderId: organizationId ? '' : props.draft.folderId });
+                  }}
+                >
+                  <option value="">{t('txt_no_organization')}</option>
+                  {props.organizations.map((org) => (
+                    <option key={org.id} value={org.id}>
+                      {org.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {props.draft.organizationId ? (
+                <label className="field">
+                  <span>{t('txt_collection')}</span>
+                  <select
+                    className="input"
+                    value={props.draft.collectionIds?.[0] || ''}
+                    onInput={(e) => props.onUpdateDraft({ collectionIds: [(e.currentTarget as HTMLSelectElement).value].filter(Boolean) })}
+                  >
+                    <option value="">{t('txt_select_collection_placeholder')}</option>
+                    {(props.collectionsByOrg[props.draft.organizationId] || []).map((collection) => (
+                      <option key={collection.id} value={collection.id}>
+                        {collection.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+            </>
+          ) : null}
         </div>
         <label className="field">
           <span>{t('txt_name')}</span>

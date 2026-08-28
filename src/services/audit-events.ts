@@ -87,6 +87,18 @@ const ALLOWED_METADATA_KEYS = new Set([
   'error',
   'expiresInHours',
   'checksumMismatchAccepted',
+  'organizationId',
+  'collectionId',
+  'memberId',
+  'role',
+  'collectionCount',
+  'invitationId',
+  'ssoIdentifier',
+  'ssoProvider',
+  'externalId',
+  'scimToken',
+  'groupName',
+  'active',
 ]);
 
 function normalizePositiveInteger(value: unknown, allowed: readonly number[]): number | null {

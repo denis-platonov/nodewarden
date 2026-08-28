@@ -31,7 +31,16 @@ type BackupTableName =
   | 'webauthn_credentials'
   | 'folders'
   | 'ciphers'
-  | 'attachments';
+  | 'attachments'
+  | 'organizations'
+  | 'organization_members'
+  | 'collections'
+  | 'collection_items'
+  | 'organization_invitations'
+  | 'policies'
+  | 'sso_configs'
+  | 'scim_configs'
+  | 'scim_users';
 
 const BACKUP_TABLES: BackupTableName[] = [
   'config',
@@ -42,6 +51,15 @@ const BACKUP_TABLES: BackupTableName[] = [
   'folders',
   'ciphers',
   'attachments',
+  'organizations',
+  'organization_members',
+  'collections',
+  'collection_items',
+  'organization_invitations',
+  'policies',
+  'sso_configs',
+  'scim_configs',
+  'scim_users',
 ];
 
 function shadowTableName(table: BackupTableName): string {
@@ -180,6 +198,15 @@ function buildResetImportTargetStatements(db: D1Database): D1PreparedStatement[]
     'DELETE FROM user_revisions',
     'DELETE FROM users',
     'DELETE FROM config',
+    'DELETE FROM organization_members',
+    'DELETE FROM collection_items',
+    'DELETE FROM collections',
+    'DELETE FROM organization_invitations',
+    'DELETE FROM policies',
+    'DELETE FROM organizations',
+    'DELETE FROM sso_configs',
+    'DELETE FROM scim_configs',
+    'DELETE FROM scim_users',
   ].map((sql) => db.prepare(sql));
 }
 
@@ -689,6 +716,91 @@ async function importBackupRows(db: D1Database, payload: BackupPayload['db'], us
     tableName('attachments'),
     buildInsertStatements(db, tableName('attachments'), ['id', 'cipher_id', 'file_name', 'size', 'size_name', 'key'], payload.attachments || [])
   );
+  await runInsertBatch(
+    db,
+    tableName('organizations'),
+    buildInsertStatements(
+      db,
+      tableName('organizations'),
+      ['id', 'name', 'enabled', 'use_totp', 'owner_id', 'billing_email', 'public_key', 'private_key', 'identifier', 'created_at', 'updated_at'],
+      payload.organizations || []
+    )
+  );
+  await runInsertBatch(
+    db,
+    tableName('organization_members'),
+    buildInsertStatements(
+      db,
+      tableName('organization_members'),
+      ['organization_id', 'user_id', 'status', 'role', 'permissions', 'collections', 'encrypted_org_key', 'created_at', 'updated_at'],
+      payload.organization_members || []
+    )
+  );
+  await runInsertBatch(
+    db,
+    tableName('collections'),
+    buildInsertStatements(
+      db,
+      tableName('collections'),
+      ['id', 'organization_id', 'name', 'external_id', 'created_at', 'updated_at'],
+      payload.collections || []
+    )
+  );
+  await runInsertBatch(
+    db,
+    tableName('collection_items'),
+    buildInsertStatements(db, tableName('collection_items'), ['collection_id', 'cipher_id'], payload.collection_items || [])
+  );
+  await runInsertBatch(
+    db,
+    tableName('organization_invitations'),
+    buildInsertStatements(
+      db,
+      tableName('organization_invitations'),
+      ['id', 'organization_id', 'email', 'role', 'permissions', 'collections', 'invited_by', 'status', 'token', 'expires_at', 'created_at', 'updated_at'],
+      payload.organization_invitations || []
+    )
+  );
+  await runInsertBatch(
+    db,
+    tableName('policies'),
+    buildInsertStatements(
+      db,
+      tableName('policies'),
+      ['id', 'organization_id', 'type', 'data', 'created_at', 'updated_at'],
+      payload.policies || []
+    )
+  );
+  await runInsertBatch(
+    db,
+    tableName('sso_configs'),
+    buildInsertStatements(
+      db,
+      tableName('sso_configs'),
+      ['organization_id', 'enabled', 'identifier', 'provider', 'client_id', 'client_secret', 'issuer', 'authorization_endpoint', 'token_endpoint', 'userinfo_endpoint', 'jwks_uri', 'scopes', 'created_at', 'updated_at'],
+      payload.sso_configs || []
+    )
+  );
+  await runInsertBatch(
+    db,
+    tableName('scim_configs'),
+    buildInsertStatements(
+      db,
+      tableName('scim_configs'),
+      ['organization_id', 'enabled', 'token_hash', 'created_at', 'updated_at'],
+      payload.scim_configs || []
+    )
+  );
+  await runInsertBatch(
+    db,
+    tableName('scim_users'),
+    buildInsertStatements(
+      db,
+      tableName('scim_users'),
+      ['organization_id', 'external_id', 'user_id', 'active', 'created_at', 'updated_at'],
+      payload.scim_users || []
+    )
+  );
 }
 
 export async function importBackupArchiveBytes(
@@ -741,6 +853,15 @@ export async function importBackupArchiveBytes(
       folders: (db.folders || []).length,
       ciphers: (db.ciphers || []).length,
       attachments: (db.attachments || []).length,
+      organizations: (db.organizations || []).length,
+      organization_members: (db.organization_members || []).length,
+      collections: (db.collections || []).length,
+      collection_items: (db.collection_items || []).length,
+      organization_invitations: (db.organization_invitations || []).length,
+      policies: (db.policies || []).length,
+      sso_configs: (db.sso_configs || []).length,
+      scim_configs: (db.scim_configs || []).length,
+      scim_users: (db.scim_users || []).length,
     });
 
     await progress?.({
@@ -764,6 +885,15 @@ export async function importBackupArchiveBytes(
       folders: (db.folders || []).length,
       ciphers: (db.ciphers || []).length,
       attachments: restored.restoredAttachments.length,
+      organizations: (db.organizations || []).length,
+      organization_members: (db.organization_members || []).length,
+      collections: (db.collections || []).length,
+      collection_items: (db.collection_items || []).length,
+      organization_invitations: (db.organization_invitations || []).length,
+      policies: (db.policies || []).length,
+      sso_configs: (db.sso_configs || []).length,
+      scim_configs: (db.scim_configs || []).length,
+      scim_users: (db.scim_users || []).length,
     });
     await progress?.({
       source: 'local',

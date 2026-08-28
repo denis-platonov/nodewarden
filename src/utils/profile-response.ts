@@ -1,11 +1,56 @@
-import type { Env, ProfileResponse, User } from '../types';
+import type { Env, ProfileResponse, User, OrganizationResponse } from '../types';
 import { buildAccountKeys } from './user-decryption';
 import { isYubiKeyEnabled } from './yubico-otp';
+import { getOrganizationsForUser } from '../services/storage-organization-repo';
+import { getOrganizationMembershipsForUser } from '../services/storage-organization-repo';
 
-export function buildProfileResponse(user: User, env?: Env): ProfileResponse {
-  void env;
-  const organizations: any[] = [];
+function toProfileOrganization(org: NonNullable<Awaited<ReturnType<typeof getOrganizationsForUser>>[number]>): OrganizationResponse {
+  return {
+    id: org.id,
+    name: org.name,
+    enabled: org.enabled,
+    useTotp: org.useTotp,
+    ownerId: org.ownerId,
+    billingEmail: org.billingEmail,
+    key: org.publicKey,
+    publicKey: org.publicKey,
+    privateKey: org.privateKey,
+    identifier: org.identifier,
+    creationDate: org.createdAt,
+    revisionDate: org.updatedAt,
+    object: 'organization',
+  };
+}
+
+export async function buildProfileResponse(user: User, env: Env): Promise<ProfileResponse> {
   const accountKeys = buildAccountKeys(user);
+
+  let organizations: any[] = [];
+  if (env?.DB) {
+    try {
+      const [orgs, memberships] = await Promise.all([
+        getOrganizationsForUser(env.DB, user.id),
+        getOrganizationMembershipsForUser(env.DB, user.id),
+      ]);
+      const memberByOrg = new Map(memberships.map((m) => [m.organizationId, m]));
+      organizations = orgs
+        .filter((org) => org.enabled)
+        .map((org) => {
+          const base = toProfileOrganization(org);
+          const membership = memberByOrg.get(org.id);
+          return {
+            ...base,
+            role: membership?.role ?? 'member',
+            permissions: membership?.permissions ?? {},
+            encryptedOrgKey: membership?.encryptedOrgKey ?? null,
+            users: [],
+          };
+        });
+    } catch (error) {
+      console.error('Failed to load organizations for profile:', error);
+      organizations = [];
+    }
+  }
 
   return {
     id: user.id,
@@ -13,7 +58,7 @@ export function buildProfileResponse(user: User, env?: Env): ProfileResponse {
     email: user.email,
     emailVerified: true,
     premium: true,
-    premiumFromOrganization: false,
+    premiumFromOrganization: organizations.length > 0,
     usesKeyConnector: false,
     masterPasswordHint: user.masterPasswordHint,
     culture: 'en-US',

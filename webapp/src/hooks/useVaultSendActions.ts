@@ -54,6 +54,7 @@ import {
 import { deriveLoginHash, getPreloginKdfConfig, verifyMasterPassword } from '@/lib/api/auth';
 import type { AuthedFetch } from '@/lib/api/shared';
 import { downloadBytesAsFile } from '@/lib/download';
+import { deriveOrgKeys } from '@/lib/org-keys';
 import type { Cipher, Folder as VaultFolder, Profile, Send, SendDraft, SessionState, VaultDraft } from '@/lib/types';
 
 type Notify = (type: 'success' | 'error' | 'warning', text: string) => void;
@@ -319,6 +320,17 @@ export default function useVaultSendActions(options: UseVaultSendActionsOptions)
       throw new Error(t('txt_offline_vault_readonly'));
     };
 
+    async function orgKeyForDraft(draft: VaultDraft): Promise<{ enc: Uint8Array; mac: Uint8Array } | null> {
+      const orgId = String(draft.organizationId || '').trim();
+      if (!orgId || !profile || !session?.symEncKey || !session?.symMacKey) return null;
+      try {
+        const orgKeys = await deriveOrgKeys(profile, session.symEncKey, session.symMacKey);
+        return orgKeys.get(orgId) || null;
+      } catch {
+        return null;
+      }
+    }
+
     async function decryptAndPatch(encrypted: Cipher) {
       if (!session?.symEncKey || !session?.symMacKey) {
         await refetchCiphers();
@@ -537,7 +549,7 @@ export default function useVaultSendActions(options: UseVaultSendActionsOptions)
         const optimistic = optimisticCipherFromDraft(draft, null);
         patchDecryptedCiphers((prev) => [optimistic, ...prev.filter((cipher) => cipher.id !== optimistic.id)]);
         try {
-          const created = await createCipher(authedFetch, session, draft);
+          const created = await createCipher(authedFetch, session, draft, await orgKeyForDraft(draft));
           for (const file of attachments) {
             setUploadingAttachmentName(file.name);
             setAttachmentUploadPercent(0);
@@ -589,7 +601,9 @@ export default function useVaultSendActions(options: UseVaultSendActionsOptions)
         }
         patchCipherBatch([cipher.id], () => optimistic, { patchEncrypted: false });
         try {
-          const updated = await updateCipher(authedFetch, session, cipher, draft);
+          const updated = await updateCipher(authedFetch, session, cipher, draft, undefined, {
+            orgKey: await orgKeyForDraft(draft),
+          });
           for (const attachmentId of removeAttachmentIds) {
             const id = String(attachmentId || '').trim();
             if (!id) continue;

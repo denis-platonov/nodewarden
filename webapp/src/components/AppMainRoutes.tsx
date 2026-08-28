@@ -7,6 +7,7 @@ import LoadingState from '@/components/LoadingState';
 import type { AdminBackupImportResponse, AdminBackupRunResponse, AdminBackupSettings, RemoteBackupBrowserResponse } from '@/lib/api/backup';
 import type { AuditLogFilters } from '@/lib/api/admin';
 import type { CiphersImportPayload } from '@/lib/api/vault';
+import type { AuthedFetch } from '@/lib/api/shared';
 import { t } from '@/lib/i18n';
 import type { AccountPasskeyCredential, AdminInvite, AdminUser, AuditLogListResult, AuditLogSettings, AuthRequest, AuthorizedDevice, Cipher, CustomEquivalentDomain, DomainRules, Folder as VaultFolder, Profile, Send, SendDraft, SessionState, TwoFactorPasskeySettings, VaultDraft, YubiKeyOtpSettings } from '@/lib/types';
 import type { ExportRequest } from '@/lib/export-formats';
@@ -23,6 +24,7 @@ const AdminPage = lazy(() => import('@/components/AdminPage'));
 const LogCenterPage = lazy(() => import('@/components/LogCenterPage'));
 const BackupCenterPage = lazy(() => import('@/components/BackupCenterPage'));
 const ImportPage = lazy(() => import('@/components/ImportPage'));
+const AdminOrganizationsPage = lazy(() => import('@/components/AdminOrganizationsPage'));
 
 function RouteContentFallback() {
   return <LoadingState card lines={5} />;
@@ -39,6 +41,7 @@ export interface AppMainRoutesProps {
   profile: Profile | null;
   profileLoading: boolean;
   session: SessionState | null;
+  authedFetch: AuthedFetch;
   mobileLayout: boolean;
   mobileSidebarToggleKey: number;
   themePreference: 'system' | 'light' | 'dark';
@@ -48,6 +51,8 @@ export interface AppMainRoutesProps {
   decryptedCiphers: Cipher[];
   decryptedFolders: VaultFolder[];
   decryptedSends: Send[];
+  organizations: Array<{ id: string; name: string; role?: string }>;
+  collections: Array<{ id: string; organizationId: string; name: string }>;
   vaultError: string;
   ciphersLoading: boolean;
   foldersLoading: boolean;
@@ -256,6 +261,8 @@ export default function AppMainRoutes(props: AppMainRoutesProps) {
           <VaultPage
             ciphers={props.decryptedCiphers}
             folders={props.decryptedFolders}
+            organizations={props.organizations}
+            collections={props.collections}
             loading={props.ciphersLoading || props.foldersLoading}
             error={props.vaultError}
             emailForReprompt={props.profile?.email || props.session?.email || ''}
@@ -484,6 +491,27 @@ export default function AppMainRoutes(props: AppMainRoutesProps) {
               onToggleUserStatus={props.onToggleUserStatus}
               onDeleteUser={props.onDeleteUser}
               onDeleteInvite={props.onDeleteInvite}
+            />
+          </Suspense>
+        </div>
+      </Route>
+      <Route path="/admin/organizations">
+        <div className="stack">
+          {props.mobileLayout && (
+            <div className="mobile-settings-subhead">
+              <button type="button" className="btn btn-secondary small mobile-settings-back" onClick={() => props.onNavigate(props.settingsHomeRoute)}>
+                <span className="btn-icon" aria-hidden="true">{"<"}</span>
+                {t('txt_back')}
+              </button>
+            </div>
+          )}
+          <Suspense fallback={<RouteContentFallback />}>
+            <AdminOrganizationsPage
+              authedFetch={props.authedFetch}
+              profile={props.profile}
+              sessionSymEncKey={props.session?.symEncKey}
+              sessionSymMacKey={props.session?.symMacKey}
+              onNotify={props.onNotify}
             />
           </Suspense>
         </div>

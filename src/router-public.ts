@@ -13,6 +13,25 @@ import {
   handleFillAssistManifest,
 } from './handlers/fill-assist';
 import { handleToken, handlePrelogin, handleRevocation } from './handlers/identity';
+import { handleSsoPrelogin, handleSsoAuthorize, handleSsoCallback } from './handlers/sso';
+import {
+  authenticateScimRequest,
+  handleScimServiceProviderConfig,
+  handleScimResourceTypes,
+  handleScimSchemas,
+  handleScimListUsers,
+  handleScimCreateUser,
+  handleScimGetUser,
+  handleScimPutUser,
+  handleScimPatchUser,
+  handleScimDeleteUser,
+  handleScimListGroups,
+  handleScimCreateGroup,
+  handleScimGetGroup,
+  handleScimPutGroup,
+  handleScimPatchGroup,
+  handleScimDeleteGroup,
+} from './handlers/scim';
 import { handleGetAccountPasskeyAssertionOptions } from './handlers/account-passkeys';
 import {
   handleRegister,
@@ -399,6 +418,22 @@ export async function handlePublicRoute(
     return handleToken(request, env);
   }
 
+  if (path === '/identity/sso/prelogin' && method === 'GET') {
+    const blocked = await enforcePublicRateLimit('public-sensitive', LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
+    if (blocked) return blocked;
+    return handleSsoPrelogin(request, env);
+  }
+
+  if (path === '/identity/connect/authorize' && method === 'GET') {
+    const blocked = await enforcePublicRateLimit('public-sensitive', LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
+    if (blocked) return blocked;
+    return handleSsoAuthorize(request, env);
+  }
+
+  if (path === '/identity/sso/callback' && method === 'GET') {
+    return handleSsoCallback(request, env);
+  }
+
   if (path === '/api/devices/knowndevice' && method === 'GET') {
     const blocked = await enforcePublicRateLimit();
     if (blocked) return jsonResponse(false);
@@ -513,5 +548,58 @@ export async function handlePublicRoute(
     if (blocked) return blocked;
     return handleAnonymousNotificationsHub(request, env);
   }
+
+  // SCIM v2 provisioning endpoints. Authenticated by the organization's SCIM token.
+  const scimV2 = path.match(/^\/api\/scim\/v2\/([^/]+)(?:\/([^/]+))?$/i);
+  if (scimV2) {
+    const blocked = await enforcePublicRateLimit('scim', LIMITS.rateLimit.scimRequestsPerMinute);
+    if (blocked) return blocked;
+    const scimAuth = await authenticateScimRequest(request, env);
+    if (!scimAuth) {
+      return new Response(
+        JSON.stringify({ schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], status: '401', detail: 'Unauthorized' }),
+        { status: 401, headers: { 'Content-Type': 'application/scim+json' } }
+      );
+    }
+    const orgId = scimAuth.orgId;
+    const resource = scimV2[1].toLowerCase();
+    const resourceId = scimV2[2];
+
+    if (resource === 'serviceproviderconfig' && method === 'GET') {
+      return handleScimServiceProviderConfig();
+    }
+    if (resource === 'resourcetypes' && method === 'GET') {
+      return handleScimResourceTypes();
+    }
+    if (resource === 'schemas' && method === 'GET') {
+      return handleScimSchemas();
+    }
+    if (resource === 'users') {
+      if (method === 'GET' && !resourceId) return handleScimListUsers(request, env, orgId);
+      if (method === 'POST' && !resourceId) return handleScimCreateUser(request, env, orgId);
+      if (resourceId) {
+        if (method === 'GET') return handleScimGetUser(request, env, orgId, resourceId);
+        if (method === 'PUT') return handleScimPutUser(request, env, orgId, resourceId);
+        if (method === 'PATCH') return handleScimPatchUser(request, env, orgId, resourceId);
+        if (method === 'DELETE') return handleScimDeleteUser(request, env, orgId, resourceId);
+      }
+    }
+    if (resource === 'groups') {
+      if (method === 'GET' && !resourceId) return handleScimListGroups(request, env, orgId);
+      if (method === 'POST' && !resourceId) return handleScimCreateGroup(request, env, orgId);
+      if (resourceId) {
+        if (method === 'GET') return handleScimGetGroup(request, env, orgId, resourceId);
+        if (method === 'PUT') return handleScimPutGroup(request, env, orgId, resourceId);
+        if (method === 'PATCH') return handleScimPatchGroup(request, env, orgId, resourceId);
+        if (method === 'DELETE') return handleScimDeleteGroup(request, env, orgId, resourceId);
+      }
+    }
+
+    return new Response(
+      JSON.stringify({ schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], status: '404', detail: 'Not found' }),
+      { status: 404, headers: { 'Content-Type': 'application/scim+json' } }
+    );
+  }
+
   return null;
 }

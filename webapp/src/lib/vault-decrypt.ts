@@ -7,6 +7,7 @@ export interface DecryptVaultCoreArgs {
   ciphers: Cipher[];
   symEncKeyB64: string;
   symMacKeyB64: string;
+  orgKeys?: Record<string, { encB64: string; macB64: string }>;
 }
 
 export interface DecryptVaultCoreResult {
@@ -120,6 +121,11 @@ export async function decryptVaultCore(args: DecryptVaultCoreArgs): Promise<Decr
   const userEnc = base64ToBytes(args.symEncKeyB64);
   const userMac = base64ToBytes(args.symMacKeyB64);
 
+  const orgKeyParts = new Map<string, { enc: Uint8Array; mac: Uint8Array }>();
+  for (const [orgId, parts] of Object.entries(args.orgKeys || {})) {
+    orgKeyParts.set(orgId, { enc: base64ToBytes(parts.encB64), mac: base64ToBytes(parts.macB64) });
+  }
+
   const folders = await Promise.all(
     args.folders.map(async (folder) => ({
       ...folder,
@@ -132,16 +138,32 @@ export async function decryptVaultCore(args: DecryptVaultCoreArgs): Promise<Decr
       let itemEnc = userEnc;
       let itemMac = userMac;
       let usesItemKey = false;
+      const organizationId = String((cipher as any).organizationId || '').trim();
+      const orgKey = organizationId ? orgKeyParts.get(organizationId) : undefined;
       if (cipher.key) {
-        try {
-          const itemKey = await decryptBw(cipher.key, userEnc, userMac);
-          if (itemKey.length >= 64) {
-            itemEnc = itemKey.slice(0, 32);
-            itemMac = itemKey.slice(32, 64);
-            usesItemKey = true;
+        if (orgKey) {
+          try {
+            const itemKey = await decryptBw(cipher.key, orgKey.enc, orgKey.mac);
+            if (itemKey.length >= 64) {
+              itemEnc = itemKey.slice(0, 32);
+              itemMac = itemKey.slice(32, 64);
+              usesItemKey = true;
+            }
+          } catch {
+            // Keep user-key fallback below.
           }
-        } catch {
-          // Keep user key fallback.
+        }
+        if (!usesItemKey) {
+          try {
+            const itemKey = await decryptBw(cipher.key, userEnc, userMac);
+            if (itemKey.length >= 64) {
+              itemEnc = itemKey.slice(0, 32);
+              itemMac = itemKey.slice(32, 64);
+              usesItemKey = true;
+            }
+          } catch {
+            // Keep user key fallback.
+          }
         }
       }
 

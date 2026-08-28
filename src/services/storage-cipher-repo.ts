@@ -299,6 +299,42 @@ export async function getCiphersByIds(
   return out;
 }
 
+export async function getCiphersByCollectionIds(
+  db: D1Database,
+  sqlChunkSize: SqlChunkSize,
+  collectionIds: string[]
+): Promise<Cipher[]> {
+  if (collectionIds.length === 0) return [];
+  const uniqueIds = sanitizeIds(collectionIds);
+  if (!uniqueIds.length) return [];
+
+  const chunkSize = sqlChunkSize(1);
+  const out: Cipher[] = [];
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const chunk = uniqueIds.slice(i, i + chunkSize);
+    const placeholders = chunk.map(() => '?').join(',');
+    const res = await db
+      .prepare(
+        `SELECT DISTINCT c.id, c.user_id, c.type, c.folder_id, c.name, c.notes, c.favorite, c.data, c.reprompt, c.key, c.created_at, c.updated_at, c.archived_at, c.deleted_at
+         FROM ciphers c
+         JOIN collection_items ci ON c.id = ci.cipher_id
+         WHERE ci.collection_id IN (${placeholders})
+           AND c.deleted_at IS NULL
+           AND json_extract(c.data, '$.deletedAt') IS NULL
+           AND json_extract(c.data, '$.deletedDate') IS NULL`
+      )
+      .bind(...chunk)
+      .all<CipherRow>();
+    out.push(
+      ...(res.results || []).flatMap((row) => {
+        const cipher = parseCipherRow(row);
+        return cipher ? [cipher] : [];
+      })
+    );
+  }
+  return out;
+}
+
 export async function bulkMoveCiphers(
   db: D1Database,
   sqlChunkSize: SqlChunkSize,

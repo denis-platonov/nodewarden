@@ -1,4 +1,4 @@
-import { Env, SyncResponse, CipherResponse, FolderResponse, ProfileResponse } from '../types';
+import { Env, SyncResponse, CipherResponse, FolderResponse, ProfileResponse, CollectionResponse, PolicyResponse, Cipher } from '../types';
 import { StorageService } from '../services/storage';
 import { errorResponse } from '../utils/response';
 import { cipherToResponse, isCipherResponseSyncCompatible, shouldPreserveRepairableCipherUris } from './ciphers';
@@ -11,6 +11,10 @@ import {
 import { buildDomainsResponse } from '../services/domain-rules';
 import { buildWebAuthnPrfOption } from '../utils/account-passkeys';
 import { buildProfileResponse } from '../utils/profile-response';
+import { getOrganizationsForUser } from '../services/storage-organization-repo';
+import { getCollectionsForOrganization } from '../services/storage-organization-repo';
+import { getPoliciesForOrganization } from '../services/storage-organization-repo';
+import { getAccessibleOrgCiphers, isOrgCipher } from '../services/storage-org-access';
 
 // CONTRACT:
 // /api/sync reuses cipherToResponse() as the single cipher response shaper.
@@ -77,12 +81,13 @@ export async function handleSync(request: Request, env: Env, userId: string): Pr
     return cachedResponse;
   }
 
-  const [ciphers, folders, sends, attachmentsByCipher, domainSettings] = await Promise.all([
+  const [ciphers, folders, sends, domainSettings, organizations, orgCiphers] = await Promise.all([
     storage.getAllCiphers(userId),
     storage.getAllFolders(userId),
     excludeSends ? Promise.resolve([]) : storage.getAllSends(userId),
-    storage.getAttachmentsByUserId(userId),
     excludeDomains ? Promise.resolve(null) : storage.getUserDomainSettings(userId),
+    getOrganizationsForUser(env.DB, userId),
+    getAccessibleOrgCiphers(env.DB, userId),
   ]);
   const webAuthnPrfOptions = accountPasskeys
     .map(buildWebAuthnPrfOption)
@@ -90,11 +95,25 @@ export async function handleSync(request: Request, env: Env, userId: string): Pr
   const userDecryptionOptions = buildUserDecryptionOptions(user, webAuthnPrfOptions[0] || null);
   const validFolderIds = new Set(folders.map((folder) => folder.id));
 
-  const profile: ProfileResponse = buildProfileResponse(user, env);
+  const profile: ProfileResponse = await buildProfileResponse(user, env);
+
+  // Merge the user's personal ciphers with organization ciphers they can access
+  // (via collections). Personal list excludes org ciphers to avoid duplication.
+  const mergedCiphers = new Map<string, Cipher>();
+  for (const cipher of ciphers) {
+    if (isOrgCipher(cipher)) continue;
+    mergedCiphers.set(cipher.id, cipher);
+  }
+  for (const cipher of orgCiphers) {
+    mergedCiphers.set(cipher.id, cipher);
+  }
+
+  const mergedAttachments = await storage.getAttachmentsByCipherIds(Array.from(mergedCiphers.keys()));
+  const mergedCipherList = Array.from(mergedCiphers.values());
 
   const cipherResponses: CipherResponse[] = [];
-  for (const cipher of ciphers) {
-    const response = cipherToResponse(cipher, attachmentsByCipher.get(cipher.id) || [], { preserveRepairableUris, validFolderIds });
+  for (const cipher of mergedCipherList) {
+    const response = cipherToResponse(cipher, mergedAttachments.get(cipher.id) || [], { preserveRepairableUris, validFolderIds });
     if (isCipherResponseSyncCompatible(response)) {
       cipherResponses.push(response);
     }
@@ -111,11 +130,42 @@ export async function handleSync(request: Request, env: Env, userId: string): Pr
     });
   }
 
+  const collectionResponses: CollectionResponse[] = [];
+  const policyResponses: PolicyResponse[] = [];
+  for (const org of organizations) {
+    const [collections, policies] = await Promise.all([
+      getCollectionsForOrganization(env.DB, org.id),
+      getPoliciesForOrganization(env.DB, org.id),
+    ]);
+    for (const collection of collections) {
+      collectionResponses.push({
+        id: collection.id,
+        organizationId: collection.organizationId,
+        name: collection.name,
+        externalId: collection.externalId,
+        creationDate: collection.createdAt,
+        revisionDate: collection.updatedAt,
+        object: 'collection',
+      });
+    }
+    for (const policy of policies) {
+      policyResponses.push({
+        id: policy.id,
+        organizationId: policy.organizationId,
+        type: policy.type,
+        data: policy.data || {},
+        creationDate: policy.createdAt,
+        revisionDate: policy.updatedAt,
+        object: 'policy',
+      });
+    }
+  }
+
   const sendResponses = sends.map(sendToResponse);
   const syncResponse: SyncResponse = {
     profile,
     folders: folderResponses,
-    collections: [],
+    collections: collectionResponses,
     ciphers: cipherResponses,
     domains: excludeDomains
       ? null
@@ -125,8 +175,8 @@ export async function handleSync(request: Request, env: Env, userId: string): Pr
           domainSettings?.excludedGlobalEquivalentDomains || [],
           { omitExcludedGlobals: true }
         ),
-    policies: [],
-    policiesNew: [],
+    policies: policyResponses,
+    policiesNew: policyResponses,
     sends: sendResponses,
     UserDecryption: {
       MasterPasswordUnlock: userDecryptionOptions.MasterPasswordUnlock,

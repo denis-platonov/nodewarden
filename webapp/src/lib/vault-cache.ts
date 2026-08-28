@@ -4,6 +4,7 @@ export interface VaultCoreSnapshot {
   ciphers: Cipher[];
   folders: Folder[];
   sends: Send[];
+  collections?: Array<Record<string, unknown>>;
 }
 
 interface VaultCoreCacheRecord {

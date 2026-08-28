@@ -17,6 +17,8 @@ import {
   getCurrentDeviceIdentifier,
   getPasswordHint,
   getProfile,
+  getSsoPrelogin,
+  loginWithSsoCode,
   loadProfileSnapshot,
   saveProfileSnapshot,
   revokeCurrentSession,
@@ -64,12 +66,14 @@ import useAdminActions from '@/hooks/useAdminActions';
 import useBackupActions from '@/hooks/useBackupActions';
 import useVaultSendActions from '@/hooks/useVaultSendActions';
 import { useToastManager } from '@/hooks/useToastManager';
-import { t } from '@/lib/i18n';
+import { t, translateServerError } from '@/lib/i18n';
 import { APP_NOTIFY_EVENT, type AppNotifyDetail } from '@/lib/app-notify';
 import { dispatchBackupProgress, type BackupProgressDetail } from '@/lib/backup-restore-progress';
 import { clearOfflineUnlockRecord } from '@/lib/offline-auth';
 import { clearPasswordSecurityCache } from '@/lib/password-security-cache';
 import { decryptSends, decryptVaultCore } from '@/lib/vault-decrypt';
+import { deriveOrgKeys } from '@/lib/org-keys';
+import { bytesToBase64, bytesToBase64Url, requireWebCrypto } from '@/lib/crypto';
 import { decryptSendsInWorker, decryptVaultCoreInWorker } from '@/lib/vault-worker';
 import {
   DEMO_CIPHERS,
@@ -213,6 +217,8 @@ export default function App() {
   const [jwtWarning, setJwtWarning] = useState<{ reason: JwtUnsafeReason; minLength: number } | null>(initialBootstrap.jwtWarning);
 
   const [loginValues, setLoginValues] = useState({ email: '', password: '' });
+  const [ssoIdentifier, setSsoIdentifier] = useState('');
+  const [ssoBusy, setSsoBusy] = useState(false);
   const [registerValues, setRegisterValues] = useState({
     name: '',
     email: '',
@@ -502,6 +508,27 @@ export default function App() {
     };
   }, [initialBootstrap]);
 
+  // Complete an SSO login callback (redirect back from the identity provider).
+  useEffect(() => {
+    if (IS_DEMO_MODE) return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get('code');
+      const state = params.get('state');
+      if (!code || !state) return;
+      const stored = sessionStorage.getItem(`nw.sso.${state}`);
+      if (!stored) return;
+      sessionStorage.removeItem(`nw.sso.${state}`);
+      const parsed = JSON.parse(stored) as { verifier?: string };
+      if (!parsed.verifier) return;
+      const cleanUrl = `${window.location.origin}${window.location.pathname}${window.location.hash || ''}`;
+      window.history.replaceState(null, '', cleanUrl);
+      void handleSsoCallback(code, parsed.verifier);
+    } catch {
+      // Ignore malformed SSO callbacks.
+    }
+  }, []);
+
   useEffect(() => {
     if (phase !== 'locked' || !session) return;
     if (IS_DEMO_MODE) return;
@@ -629,6 +656,83 @@ export default function App() {
       pushToast('error', error instanceof Error ? error.message : t('txt_login_failed'));
     } finally {
       setPendingAuthAction(null);
+    }
+  }
+
+  async function handleSsoLogin() {
+    if (ssoBusy || pendingAuthAction) return;
+    if (IS_DEMO_MODE) {
+      pushToast('warning', t('txt_demo_readonly_message'));
+      return;
+    }
+    const identifier = ssoIdentifier.trim();
+    if (!identifier) {
+      pushToast('error', t('txt_sso_identifier_required'));
+      return;
+    }
+    setSsoBusy(true);
+    try {
+      const prelogin = await getSsoPrelogin(identifier);
+      if (!prelogin.ssoAvailable) {
+        pushToast('error', t('txt_sso_not_available'));
+        return;
+      }
+      const webCrypto = requireWebCrypto();
+      const verifierBytes = webCrypto.getRandomValues(new Uint8Array(64));
+      const verifier = bytesToBase64Url(verifierBytes);
+      const challengeBytes = new Uint8Array(await webCrypto.subtle.digest('SHA-256', verifierBytes));
+      const challenge = bytesToBase64Url(challengeBytes);
+      const state = bytesToBase64Url(webCrypto.getRandomValues(new Uint8Array(24)));
+      sessionStorage.setItem(`nw.sso.${state}`, JSON.stringify({ verifier, identifier }));
+
+      const redirectUri = `${window.location.origin}/`;
+      const authorizeUrl = new URL('/identity/connect/authorize', window.location.origin);
+      authorizeUrl.searchParams.set('client_id', 'web');
+      authorizeUrl.searchParams.set('redirect_uri', redirectUri);
+      authorizeUrl.searchParams.set('response_type', 'code');
+      authorizeUrl.searchParams.set('scope', 'api offline_access');
+      authorizeUrl.searchParams.set('state', state);
+      authorizeUrl.searchParams.set('code_challenge', challenge);
+      authorizeUrl.searchParams.set('identifier', identifier);
+      window.location.href = authorizeUrl.toString();
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : t('txt_login_failed'));
+      setSsoBusy(false);
+    }
+  }
+
+  async function handleSsoCallback(code: string, verifier: string) {
+    setSsoBusy(true);
+    try {
+      const redirectUri = `${window.location.origin}/`;
+      const token = await loginWithSsoCode(code, verifier, redirectUri);
+      if (!('access_token' in token) || !token.access_token) {
+        const tokenError = token as { error_description?: string; error?: string };
+        pushToast('error', translateServerError(tokenError.error_description || tokenError.error || '', t('txt_login_failed')));
+        return;
+      }
+      const baseSession: SessionState = {
+        accessToken: token.access_token,
+        refreshToken: token.refresh_token,
+        email: '',
+        authMode: token.web_session ? 'web-cookie' : 'token',
+      };
+      const tempFetch = createAuthedFetch(
+        () => baseSession,
+        () => {}
+      );
+      const profile = await getProfile(tempFetch);
+      const finalSession: SessionState = { ...baseSession, email: (profile.email || '').trim().toLowerCase() };
+      saveProfileSnapshot(profile);
+      setSession(finalSession);
+      setProfile(profile);
+      setPhase('locked');
+      navigate('/lock');
+      pushToast('success', t('txt_sso_login_unlock_required'));
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : t('txt_login_failed'));
+    } finally {
+      setSsoBusy(false);
     }
   }
 
@@ -1339,6 +1443,20 @@ export default function App() {
     (async () => {
       try {
         setVaultDecryptError('');
+        let orgKeys: Record<string, { encB64: string; macB64: string }> = {};
+        if (profile) {
+          try {
+            const derived = await deriveOrgKeys(profile, session.symEncKey!, session.symMacKey!);
+            orgKeys = Object.fromEntries(
+              Array.from(derived.entries()).map(([orgId, material]) => [
+                orgId,
+                { encB64: bytesToBase64(material.enc), macB64: bytesToBase64(material.mac) },
+              ])
+            );
+          } catch {
+            // Org keys are best-effort; personal ciphers still decrypt without them.
+          }
+        }
         let result;
         try {
           result = await decryptVaultCoreInWorker({
@@ -1346,6 +1464,7 @@ export default function App() {
             ciphers: encryptedCiphers,
             symEncKeyB64: session.symEncKey!,
             symMacKeyB64: session.symMacKey!,
+            orgKeys,
           });
         } catch {
           result = await decryptVaultCore({
@@ -1353,6 +1472,7 @@ export default function App() {
             ciphers: encryptedCiphers,
             symEncKeyB64: session.symEncKey!,
             symMacKeyB64: session.symMacKey!,
+            orgKeys,
           });
         }
 
@@ -2016,6 +2136,7 @@ export default function App() {
     profile,
     profileLoading: profileQuery.isFetching && !profile,
     session,
+    authedFetch,
     mobileLayout,
     mobileSidebarToggleKey,
     themePreference,
@@ -2025,6 +2146,16 @@ export default function App() {
     decryptedCiphers,
     decryptedFolders,
     decryptedSends,
+    organizations: (profile?.organizations || []).map((org: any) => ({
+      id: org.id,
+      name: org.name || org.id,
+      role: org.role,
+    })),
+    collections: (encryptedVaultCore?.collections || []).map((collection: any) => ({
+      id: collection.id,
+      organizationId: collection.organizationId,
+      name: collection.name || collection.id,
+    })),
     vaultError: vaultCoreQuery.isError && !encryptedVaultCore ? t('txt_load_vault_failed') : vaultDecryptError,
     ciphersLoading: !(vaultCoreQuery.isError && !encryptedVaultCore) && !vaultDecryptError && !vaultInitialDecryptDone,
     foldersLoading: !(vaultCoreQuery.isError && !encryptedVaultCore) && !vaultDecryptError && !vaultInitialDecryptDone,
@@ -2279,6 +2410,11 @@ export default function App() {
           onSubmitPasskeyPassword={() => void handlePasskeyPasswordLogin()}
           onSubmitRegister={() => void handleRegister()}
           onSubmitUnlock={() => void handleUnlock()}
+          ssoIdentifier={ssoIdentifier}
+          ssoBusy={ssoBusy}
+          ssoEnabled={true}
+          onChangeSsoIdentifier={setSsoIdentifier}
+          onSubmitSsoLogin={() => void handleSsoLogin()}
           onGotoLogin={() => {
             setPendingPasskeyPassword(null);
             setPasskeyPassword('');

@@ -50,8 +50,8 @@
 | **Multi-user** | ✅ | ✅ | Invite-code registration |
 | Domain rules | ✅ | ✅ | Equivalent domains, global exclusions |
 | Fill-assist | ✅ | ✅ | `POST /fill-assist`|
-| Organizations / collections / roles | ✅ | ❌ | Not implemented |
-| SSO / SCIM / directory | ✅ | ❌ | Not implemented |
+| Organizations / collections / roles | ✅ | ✅ | **Shared vaults, members, roles** |
+| SSO / SCIM / directory | ✅ | ✅ | **OIDC SSO login + SCIM provisioning** |
 
 ---
 

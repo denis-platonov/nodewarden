@@ -78,6 +78,43 @@ import { handleAuthenticatedDeviceRoute } from './router-devices';
 import { handleAdminRoute } from './router-admin';
 import { handleGetDomains, handleUpdateDomains } from './handlers/domains';
 import {
+  handleGetOrganizations,
+  handleCreateOrganization,
+  handleGetOrganization,
+  handleUpdateOrganization,
+  handleDeleteOrganization,
+  handleGetOrganizationKeys,
+  handleGetOrganizationMembers,
+  handleGetOrganizationMemberPublicKey,
+  handleGetOrganizationMemberPublicKeyByEmail,
+  handleInviteOrganizationMember,
+  handleUpdateOrganizationMember,
+  handleRemoveOrganizationMember,
+  handleGetOrganizationInvitations,
+  handleRevokeOrganizationInvitation,
+  handleAcceptOrganizationInvitation,
+  handleGetCollections,
+  handleCreateCollection,
+  handleUpdateCollection,
+  handleDeleteCollection,
+  handleGetCollectionItems,
+  handleAddCollectionItem,
+  handleRemoveCollectionItem,
+  handleGetPolicies,
+  handleUpdatePolicy,
+  handleDeletePolicy,
+} from './handlers/organizations';
+import {
+  handleGetSsoConfig,
+  handlePutSsoConfig,
+  handleDeleteSsoConfig,
+} from './handlers/sso';
+import {
+  handleGetScimConfig,
+  handlePutScimConfig,
+  handleDeleteScimConfig,
+} from './handlers/scim';
+import {
   handleCreateAccountPasskeyCredential,
   handleDeleteAccountPasskeyCredential,
   handleDeleteTwoFactorWebAuthn,
@@ -402,14 +439,133 @@ export async function handleAuthenticatedRoute(
     return errorResponse('Method not allowed', 405);
   }
 
-  if (path === '/api/collections' || path.startsWith('/api/collections/')) {
-    if (method === 'GET') {
-      return jsonResponse({ data: [], object: 'list', continuationToken: null });
-    }
-    return null;
+  if (path === '/api/organizations') {
+    if (method === 'GET') return handleGetOrganizations(request, env, userId);
+    if (method === 'POST') return handleCreateOrganization(request, env, userId);
+    return errorResponse('Method not allowed', 405);
   }
 
-  if (path === '/api/organizations' || path.startsWith('/api/organizations/')) {
+  const orgInvitationAcceptMatch = path.match(/^\/api\/organizations\/invitations\/([a-f0-9-]+)\/accept$/i);
+  if (orgInvitationAcceptMatch && method === 'POST') {
+    return handleAcceptOrganizationInvitation(request, env, userId, orgInvitationAcceptMatch[1]);
+  }
+
+  const orgMatch = path.match(/^\/api\/organizations\/([a-f0-9-]+)(\/.*)?$/i);
+  if (orgMatch) {
+    const orgId = orgMatch[1];
+    const subPath = orgMatch[2] || '';
+
+    if (subPath === '' || subPath === '/') {
+      if (method === 'GET') return handleGetOrganization(request, env, userId, orgId);
+      if (method === 'PUT' || method === 'POST') return handleUpdateOrganization(request, env, userId, orgId);
+      if (method === 'DELETE') return handleDeleteOrganization(request, env, userId, orgId);
+      return errorResponse('Method not allowed', 405);
+    }
+
+    if (subPath === '/keys') {
+      if (method === 'GET') return handleGetOrganizationKeys(request, env, userId, orgId);
+      return errorResponse('Method not allowed', 405);
+    }
+
+    if (subPath === '/sso') {
+      if (method === 'GET') return handleGetSsoConfig(request, env, userId, orgId);
+      if (method === 'PUT' || method === 'POST') return handlePutSsoConfig(request, env, userId, orgId);
+      if (method === 'DELETE') return handleDeleteSsoConfig(request, env, userId, orgId);
+      return errorResponse('Method not allowed', 405);
+    }
+
+    if (subPath === '/scim') {
+      if (method === 'GET') return handleGetScimConfig(request, env, userId, orgId);
+      if (method === 'PUT' || method === 'POST') return handlePutScimConfig(request, env, userId, orgId);
+      if (method === 'DELETE') return handleDeleteScimConfig(request, env, userId, orgId);
+      return errorResponse('Method not allowed', 405);
+    }
+
+    if (subPath === '/members') {
+      if (method === 'GET') return handleGetOrganizationMembers(request, env, userId, orgId);
+      return errorResponse('Method not allowed', 405);
+    }
+
+    if (subPath === '/members/invite' && method === 'POST') {
+      return handleInviteOrganizationMember(request, env, userId, orgId);
+    }
+
+    if (subPath === '/members/public-key' && method === 'GET') {
+      return handleGetOrganizationMemberPublicKeyByEmail(request, env, userId, orgId);
+    }
+
+    const memberPublicKeyMatch = subPath.match(/^\/members\/([a-f0-9-]+)\/public-key$/i);
+    if (memberPublicKeyMatch && method === 'GET') {
+      return handleGetOrganizationMemberPublicKey(request, env, userId, orgId, memberPublicKeyMatch[1]);
+    }
+
+    const memberMatch = subPath.match(/^\/members\/([a-f0-9-]+)$/i);
+    if (memberMatch) {
+      const memberUserId = memberMatch[1];
+      if (method === 'PUT' || method === 'POST') {
+        return handleUpdateOrganizationMember(request, env, userId, orgId, memberUserId);
+      }
+      if (method === 'DELETE') {
+        return handleRemoveOrganizationMember(request, env, userId, orgId, memberUserId);
+      }
+      return errorResponse('Method not allowed', 405);
+    }
+
+    if (subPath === '/invitations') {
+      if (method === 'GET') return handleGetOrganizationInvitations(request, env, userId, orgId);
+      return errorResponse('Method not allowed', 405);
+    }
+
+    const invitationMatch = subPath.match(/^\/invitations\/([a-f0-9-]+)$/i);
+    if (invitationMatch && method === 'DELETE') {
+      return handleRevokeOrganizationInvitation(request, env, userId, orgId, invitationMatch[1]);
+    }
+
+    if (subPath === '/collections') {
+      if (method === 'GET') return handleGetCollections(request, env, userId, orgId);
+      if (method === 'POST') return handleCreateCollection(request, env, userId, orgId);
+      return errorResponse('Method not allowed', 405);
+    }
+
+    const collectionMatch = subPath.match(/^\/collections\/([a-f0-9-]+)(\/.*)?$/i);
+    if (collectionMatch) {
+      const collectionId = collectionMatch[1];
+      const collSubPath = collectionMatch[2] || '';
+
+      if (collSubPath === '' || collSubPath === '/') {
+        if (method === 'PUT' || method === 'POST') return handleUpdateCollection(request, env, userId, orgId, collectionId);
+        if (method === 'DELETE') return handleDeleteCollection(request, env, userId, orgId, collectionId);
+        return errorResponse('Method not allowed', 405);
+      }
+
+      if (collSubPath === '/items') {
+        if (method === 'GET') return handleGetCollectionItems(request, env, userId, orgId, collectionId);
+        if (method === 'POST') return handleAddCollectionItem(request, env, userId, orgId, collectionId);
+        return errorResponse('Method not allowed', 405);
+      }
+
+      const itemMatch = collSubPath.match(/^\/items\/([a-f0-9-]+)$/i);
+      if (itemMatch && method === 'DELETE') {
+        return handleRemoveCollectionItem(request, env, userId, orgId, collectionId, itemMatch[1]);
+      }
+    }
+
+    if (subPath === '/policies') {
+      if (method === 'GET') return handleGetPolicies(request, env, userId, orgId);
+      return errorResponse('Method not allowed', 405);
+    }
+
+    const policyMatch = subPath.match(/^\/policies\/([a-f0-9-]+)$/i);
+    if (policyMatch) {
+      if (method === 'PUT' || method === 'POST') return handleUpdatePolicy(request, env, userId, orgId, policyMatch[1]);
+      if (method === 'DELETE') return handleDeletePolicy(request, env, userId, orgId, policyMatch[1]);
+      return errorResponse('Method not allowed', 405);
+    }
+
+    return errorResponse('Not found', 404);
+  }
+
+  if (path === '/api/collections' || path.startsWith('/api/collections/')) {
     if (method === 'GET') {
       return jsonResponse({ data: [], object: 'list', continuationToken: null });
     }
@@ -455,13 +611,6 @@ export async function handleAuthenticatedRoute(
       if (method === 'GET') return handleGetSendFileUpload(request, env, userId, sendId, fileId);
       if (method === 'POST' || method === 'PUT') return handleUploadSendFile(request, env, userId, sendId, fileId);
     }
-  }
-
-  if (path === '/api/policies' || path.startsWith('/api/policies/')) {
-    if (method === 'GET') {
-      return jsonResponse({ data: [], object: 'list', continuationToken: null });
-    }
-    return null;
   }
 
   if (path === '/api/settings/domains' || path === '/settings/domains') {

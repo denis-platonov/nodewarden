@@ -19,6 +19,7 @@ export interface Profile {
   privateKey?: string | null;
   publicKey?: string | null;
   role: 'admin' | 'user';
+  organizations?: Array<Record<string, unknown>>;
   [k: string]: unknown;
 }
 
@@ -328,6 +329,8 @@ export interface VaultDraft {
   favorite: boolean;
   name: string;
   folderId: string;
+  organizationId?: string | null;
+  collectionIds?: string[];
   notes: string;
   reprompt: boolean;
   loginUsername: string;

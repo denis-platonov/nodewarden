@@ -21,7 +21,7 @@ export function buildConfigResponse(origin: string) {
       identity: origin + '/identity',
       notifications: origin + '/notifications',
       icons: origin,
-      sso: '',
+      sso: origin,
       fillAssistRules: fillAssistBase,
     },
     push: {

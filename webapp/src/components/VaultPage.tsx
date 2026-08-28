@@ -40,6 +40,8 @@ import { t } from '@/lib/i18n';
 interface VaultPageProps {
   ciphers: Cipher[];
   folders: Folder[];
+  organizations: Array<{ id: string; name: string; role?: string }>;
+  collections: Array<{ id: string; organizationId: string; name: string }>;
   loading: boolean;
   error: string;
   emailForReprompt: string;
@@ -352,6 +354,15 @@ export default function VaultPage(props: VaultPageProps) {
     () => new Intl.Collator(undefined, { sensitivity: 'base', numeric: true }),
     []
   );
+
+  const collectionsByOrg = useMemo(() => {
+    const byOrg: Record<string, Array<{ id: string; name: string }>> = {};
+    for (const collection of props.collections) {
+      if (!byOrg[collection.organizationId]) byOrg[collection.organizationId] = [];
+      byOrg[collection.organizationId].push({ id: collection.id, name: collection.name });
+    }
+    return byOrg;
+  }, [props.collections]);
 
   const duplicateSignatureInfo = useMemo(() => {
     if (sidebarFilter.kind !== 'duplicates') return null;
@@ -1296,6 +1307,8 @@ const folderName = useCallback((id: string | null | undefined): string => {
                 isCreating={isCreating}
                 busy={busy}
                 folders={props.folders}
+                organizations={props.organizations}
+                collectionsByOrg={collectionsByOrg}
                 selectedCipher={selectedCipher}
                 editExistingAttachments={editExistingAttachments}
                 removedAttachmentIds={removedAttachmentIds}

@@ -21,6 +21,8 @@ const intentionallyEnglishKeys = new Set([
   'txt_backup_destination_name_default_s3',
   'txt_dash',
   'txt_text_3',
+  'txt_collections',
+  'txt_collection',
 ]);
 const intentionallyEnglishPrefixes = [
   'txt_log_action_',
@@ -28,6 +30,8 @@ const intentionallyEnglishPrefixes = [
   'txt_log_reason_',
   'txt_log_target_type_',
   'txt_log_trigger_',
+  'txt_org_',
+  'txt_sso_',
 ];
 
 function isIntentionallyEnglishKey(key) {

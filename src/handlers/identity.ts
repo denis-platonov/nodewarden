@@ -23,6 +23,7 @@ import {
   buildTwoFactorPasskeyAssertionOptions,
 } from './account-passkeys';
 import { isAuthRequestExpired } from '../services/storage-auth-request-repo';
+import { validateSsoCode } from './sso';
 import { createPasskeyUserVerificationToken } from '../utils/user-verification-token';
 import { constantTimeEquals, verifyApiKey } from '../utils/api-key';
 import { isYubiKeyEnabled, userYubiKeyPublicIds, verifyYubicoOtp, yubiKeyPublicIdFromOtp } from '../utils/yubico-otp';
@@ -834,6 +835,106 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
     await safeWriteAuditEvent(env, {
       actorUserId: user.id,
       action: 'auth.login.success',
+      category: 'auth',
+      level: 'info',
+      targetType: 'user',
+      targetId: user.id,
+      metadata: {
+        grantType,
+        webSession: shouldUseWebSession(request),
+        deviceIdentifier: deviceSession?.identifier ?? deviceInfo.deviceIdentifier,
+        deviceType: deviceInfo.deviceType,
+        ...auditRequestMetadata(request),
+      },
+    });
+
+    const response: TokenResponse = {
+      access_token: accessToken,
+      expires_in: LIMITS.auth.accessTokenTtlSeconds,
+      token_type: 'Bearer',
+      ...(shouldUseWebSession(request) ? { web_session: true } : { refresh_token: refreshToken }),
+      Key: user.key,
+      PrivateKey: user.privateKey,
+      AccountKeys: accountKeys,
+      accountKeys: accountKeys,
+      Kdf: user.kdfType,
+      KdfIterations: user.kdfIterations,
+      KdfMemory: user.kdfMemory,
+      KdfParallelism: user.kdfParallelism,
+      ForcePasswordReset: false,
+      ResetMasterPassword: false,
+      MasterPasswordPolicy: masterPasswordPolicyResponse(),
+      ApiUseKeyConnector: false,
+      scope: 'api offline_access',
+      unofficialServer: true,
+      UserDecryptionOptions: userDecryptionOptions,
+      userDecryptionOptions: userDecryptionOptions,
+    };
+
+    const baseResponse = identityJsonResponse(response);
+    return shouldUseWebSession(request)
+      ? withWebRefreshCookie(request, baseResponse, refreshToken)
+      : baseResponse;
+
+  } else if (grantType === 'sso') {
+    // Login via organization single sign-on (OIDC). The browser redirect flow
+    // produces a one-time code that is validated with its PKCE verifier here.
+    const code = String(body.code || '').trim();
+    const codeVerifier = String(body.code_verifier || '').trim();
+    const redirectUri = String(body.redirect_uri || '').trim() || null;
+    const deviceInfo = readAuthRequestDeviceInfo(body, request);
+    const loginIdentifier = await loginRateLimitKey(clientIdentifier!, grantType, code || 'missing-code');
+
+    const loginCheck = await rateLimit.checkLoginAttempt(loginIdentifier);
+    if (!loginCheck.allowed) {
+      return identityErrorResponse(
+        `Too many failed login attempts. Try again in ${Math.ceil(loginCheck.retryAfterSeconds! / 60)} minutes.`,
+        'TooManyRequests',
+        429
+      );
+    }
+
+    if (!code) {
+      return identityErrorResponse('SSO code is required', 'invalid_request', 400);
+    }
+
+    const ssoResult = await validateSsoCode(env, code, codeVerifier || null, redirectUri);
+    if (!ssoResult.user) {
+      await rateLimit.recordFailedLogin(loginIdentifier);
+      await safeWriteAuditEvent(env, {
+        action: 'auth.sso.login.failed',
+        category: 'auth',
+        level: 'warn',
+        targetType: 'ssoLogin',
+        metadata: {
+          grantType,
+          reason: ssoResult.error,
+          deviceIdentifier: deviceInfo.deviceIdentifier,
+          ...auditRequestMetadata(request),
+        },
+      });
+      return identityErrorResponse('The SSO login could not be completed. Try again.', 'invalid_grant', 400);
+    }
+
+    const user = ssoResult.user;
+    if (user.status !== 'active') {
+      await rateLimit.recordFailedLogin(loginIdentifier);
+      return identityErrorResponse('Account is disabled', 'invalid_grant', 400);
+    }
+
+    await rateLimit.clearLoginAttempts(loginIdentifier);
+    const deviceSession = await persistAndResolveDeviceSession(storage, user.id, deviceInfo);
+    if (deviceSession) {
+      await persistIdentityDevicePushToken(env, storage, user.id, deviceSession, deviceInfo.deviceType, body);
+    }
+
+    const accessToken = await auth.generateAccessToken(user, deviceSession);
+    const refreshToken = await auth.generateRefreshToken(user, deviceSession, resolveRefreshClientType(request, body));
+    const accountKeys = buildAccountKeys(user);
+    const userDecryptionOptions = buildUserDecryptionOptions(user);
+    await safeWriteAuditEvent(env, {
+      actorUserId: user.id,
+      action: 'auth.sso.login.success',
       category: 'auth',
       level: 'info',
       targetType: 'user',

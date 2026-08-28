@@ -72,6 +72,15 @@ export interface BackupPayload {
     ciphers: SqlRow[];
     attachments: SqlRow[];
     webauthn_credentials?: SqlRow[];
+    organizations?: SqlRow[];
+    organization_members?: SqlRow[];
+    collections?: SqlRow[];
+    collection_items?: SqlRow[];
+    organization_invitations?: SqlRow[];
+    policies?: SqlRow[];
+    sso_configs?: SqlRow[];
+    scim_configs?: SqlRow[];
+    scim_users?: SqlRow[];
   };
 }
 
@@ -490,7 +499,7 @@ export async function buildBackupArchive(
     includeAttachments,
   });
   const encoder = new TextEncoder();
-  const [configRows, userRows, domainSettingsRows, revisionRows, folderRows, cipherRows, attachmentRows, accountPasskeyRows] = await Promise.all([
+  const [configRows, userRows, domainSettingsRows, revisionRows, folderRows, cipherRows, attachmentRows, accountPasskeyRows, organizationRows, organizationMemberRows, collectionRows, collectionItemRows, organizationInvitationRows, policyRows, ssoConfigRows, scimConfigRows, scimUserRows] = await Promise.all([
     queryRows(env.DB, 'SELECT key, value FROM config ORDER BY key ASC'),
     queryRows(env.DB, 'SELECT id, email, name, master_password_hint, master_password_hash, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, role, status, verify_devices, totp_secret, totp_recovery_code, yubikey_key1, yubikey_key2, yubikey_key3, yubikey_key4, yubikey_key5, yubikey_nfc, created_at, updated_at FROM users ORDER BY created_at ASC'),
     queryRows(env.DB, 'SELECT user_id, equivalent_domains, custom_equivalent_domains, excluded_global_equivalent_domains, updated_at FROM domain_settings ORDER BY user_id ASC'),
@@ -499,6 +508,15 @@ export async function buildBackupArchive(
     queryRows(env.DB, 'SELECT id, user_id, type, folder_id, name, notes, favorite, data, reprompt, key, created_at, updated_at, archived_at, deleted_at FROM ciphers ORDER BY created_at ASC'),
     queryRows(env.DB, 'SELECT id, cipher_id, file_name, size, size_name, key FROM attachments ORDER BY cipher_id ASC, id ASC'),
     queryRows(env.DB, 'SELECT id, user_id, purpose, name, public_key, credential_id, counter, type, aa_guid, transports, encrypted_user_key, encrypted_public_key, encrypted_private_key, supports_prf, created_at, updated_at FROM webauthn_credentials ORDER BY created_at ASC'),
+    queryRows(env.DB, 'SELECT id, name, enabled, use_totp, owner_id, billing_email, public_key, private_key, identifier, created_at, updated_at FROM organizations ORDER BY created_at ASC'),
+    queryRows(env.DB, 'SELECT organization_id, user_id, status, role, permissions, collections, encrypted_org_key, created_at, updated_at FROM organization_members ORDER BY organization_id ASC, user_id ASC'),
+    queryRows(env.DB, 'SELECT id, organization_id, name, external_id, created_at, updated_at FROM collections ORDER BY created_at ASC'),
+    queryRows(env.DB, 'SELECT collection_id, cipher_id FROM collection_items ORDER BY collection_id ASC, cipher_id ASC'),
+    queryRows(env.DB, 'SELECT id, organization_id, email, role, permissions, collections, invited_by, status, token, expires_at, created_at, updated_at FROM organization_invitations ORDER BY created_at ASC'),
+    queryRows(env.DB, 'SELECT id, organization_id, type, data, created_at, updated_at FROM policies ORDER BY created_at ASC'),
+    queryRows(env.DB, 'SELECT organization_id, enabled, identifier, provider, client_id, client_secret, issuer, authorization_endpoint, token_endpoint, userinfo_endpoint, jwks_uri, scopes, created_at, updated_at FROM sso_configs ORDER BY organization_id ASC'),
+    queryRows(env.DB, 'SELECT organization_id, enabled, token_hash, created_at, updated_at FROM scim_configs ORDER BY organization_id ASC'),
+    queryRows(env.DB, 'SELECT organization_id, external_id, user_id, active, created_at, updated_at FROM scim_users ORDER BY organization_id ASC, external_id ASC'),
   ]);
   const exportedConfigRows = sanitizeConfigRowsForExport(configRows);
   const exportedAttachmentRows = includeAttachments ? attachmentRows : [];
@@ -527,6 +545,15 @@ export async function buildBackupArchive(
       ciphers: cipherRows.length,
       attachments: exportedAttachmentRows.length,
       webauthn_credentials: accountPasskeyRows.length,
+      organizations: organizationRows.length,
+      organization_members: organizationMemberRows.length,
+      collections: collectionRows.length,
+      collection_items: collectionItemRows.length,
+      organization_invitations: organizationInvitationRows.length,
+      policies: policyRows.length,
+      sso_configs: ssoConfigRows.length,
+      scim_configs: scimConfigRows.length,
+      scim_users: scimUserRows.length,
     },
     includes: {
       attachments: includeAttachments,
@@ -550,6 +577,15 @@ export async function buildBackupArchive(
       ciphers: cipherRows,
       attachments: exportedAttachmentRows,
       webauthn_credentials: accountPasskeyRows,
+      organizations: organizationRows,
+      organization_members: organizationMemberRows,
+      collections: collectionRows,
+      collection_items: collectionItemRows,
+      organization_invitations: organizationInvitationRows,
+      policies: policyRows,
+      sso_configs: ssoConfigRows,
+      scim_configs: scimConfigRows,
+      scim_users: scimUserRows,
     }, null, BACKUP_JSON_INDENT)),
   };
 

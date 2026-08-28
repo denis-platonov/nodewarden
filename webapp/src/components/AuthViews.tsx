@@ -46,6 +46,11 @@ interface AuthViewsProps {
   onSubmitPasskeyPassword: () => void;
   onSubmitRegister: () => void;
   onSubmitUnlock: () => void;
+  ssoIdentifier: string;
+  ssoBusy: boolean;
+  ssoEnabled: boolean;
+  onChangeSsoIdentifier: (value: string) => void;
+  onSubmitSsoLogin: () => void;
   onGotoLogin: () => void;
   onGotoRegister: () => void;
   onLogout: () => void;
@@ -357,6 +362,31 @@ export default function AuthViews(props: AuthViewsProps) {
             <KeyRound size={16} className="btn-icon" />
             {passkeyBusy ? t('txt_logging_in') : t('txt_login_with_passkey')}
           </button>
+          {props.ssoEnabled ? (
+            <>
+              <div className="or">{t('txt_or')}</div>
+              <label className="field">
+                <span>{t('txt_sso_identifier')}</span>
+                <input
+                  className="input"
+                  type="text"
+                  value={props.ssoIdentifier}
+                  autoComplete="off"
+                  placeholder={t('txt_sso_identifier_placeholder')}
+                  onInput={(e) => props.onChangeSsoIdentifier((e.currentTarget as HTMLInputElement).value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn btn-secondary full"
+                onClick={props.onSubmitSsoLogin}
+                disabled={loginBusy || passkeyBusy || props.ssoBusy || !props.ssoIdentifier.trim()}
+              >
+                <LogIn size={16} className="btn-icon" />
+                {props.ssoBusy ? t('txt_logging_in') : t('txt_login_with_sso')}
+              </button>
+            </>
+          ) : null}
           <div className="or">{t('txt_or')}</div>
           <button type="button" className="btn btn-secondary full" onClick={props.onGotoRegister} disabled={loginBusy || passkeyBusy}>
             <UserPlus size={16} className="btn-icon" />

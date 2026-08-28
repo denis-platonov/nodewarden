@@ -1269,19 +1269,33 @@ export async function repairCipherKeyMismatches(
 async function buildCipherPayload(
   session: SessionState,
   draft: VaultDraft,
-  cipher: Cipher | null
+  cipher: Cipher | null,
+  orgKey?: { enc: Uint8Array; mac: Uint8Array } | null
 ): Promise<Record<string, unknown>> {
   if (!session.symEncKey || !session.symMacKey) throw new Error('Vault key unavailable');
   const userEnc = base64ToBytes(session.symEncKey);
   const userMac = base64ToBytes(session.symMacKey);
-  const keys = await getCipherKeys(cipher, userEnc, userMac);
+  let keys = await getCipherKeys(cipher, userEnc, userMac);
+
+  const isOrgItem = !!draft.organizationId;
+  if (isOrgItem) {
+    if (!orgKey) throw new Error('Organization key unavailable');
+    const webCrypto = crypto;
+    const itemKey = webCrypto.getRandomValues(new Uint8Array(64));
+    keys = {
+      enc: itemKey.slice(0, 32),
+      mac: itemKey.slice(32, 64),
+      key: await encryptBw(itemKey, orgKey.enc, orgKey.mac),
+    };
+  }
+
   const type = Number(draft.type || cipher?.type || 1);
   const now = new Date().toISOString();
 
   const payload: Record<string, unknown> = {
     type,
     favorite: !!draft.favorite,
-    folderId: asNullable(draft.folderId),
+    folderId: isOrgItem ? null : asNullable(draft.folderId),
     reprompt: draft.reprompt ? 1 : 0,
     name: await encryptTextValue(draft.name, keys.enc, keys.mac),
     notes: await encryptTextValue(draft.notes, keys.enc, keys.mac),
@@ -1296,6 +1310,11 @@ async function buildCipherPayload(
     fields: await encryptCustomFields(draft.customFields || [], keys.enc, keys.mac),
     passwordHistory: await encryptPasswordHistory(cipher?.passwordHistory, keys.enc, keys.mac),
   };
+
+  if (isOrgItem) {
+    payload.organizationId = draft.organizationId;
+    payload.collectionIds = draft.collectionIds || [];
+  }
 
   if (cipher?.id) {
     payload.id = cipher.id;
@@ -1433,15 +1452,16 @@ async function buildCipherPayload(
 }
 
 export async function buildCipherImportPayload(session: SessionState, draft: VaultDraft): Promise<Record<string, unknown>> {
-  return buildCipherPayload(session, draft, null);
+  return buildCipherPayload(session, draft, null, null);
 }
 
 export async function createCipher(
   authedFetch: AuthedFetch,
   session: SessionState,
-  draft: VaultDraft
+  draft: VaultDraft,
+  orgKey?: { enc: Uint8Array; mac: Uint8Array } | null
 ): Promise<Cipher> {
-  const payload = await buildCipherPayload(session, draft, null);
+  const payload = await buildCipherPayload(session, draft, null, orgKey);
 
   const resp = await authedFetch('/api/ciphers', {
     method: 'POST',
@@ -1460,9 +1480,9 @@ export async function updateCipher(
   cipher: Cipher,
   draft: VaultDraft,
   extraPayload?: Record<string, unknown>,
-  options?: { webRepair?: boolean }
+  options?: { webRepair?: boolean; orgKey?: { enc: Uint8Array; mac: Uint8Array } | null }
 ): Promise<Cipher> {
-  const payload = await buildCipherPayload(session, draft, cipher);
+  const payload = await buildCipherPayload(session, draft, cipher, options?.orgKey ?? null);
   if (extraPayload) {
     Object.assign(payload, extraPayload);
   }

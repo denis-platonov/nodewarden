@@ -642,11 +642,11 @@ export interface FolderResponse {
 export interface SyncResponse {
   profile: ProfileResponse;
   folders: FolderResponse[];
-  collections: any[];
+  collections: CollectionResponse[];
   ciphers: CipherResponse[];
   domains: any;
-  policies: any[];
-  policiesNew?: any[];
+  policies: PolicyResponse[];
+  policiesNew?: PolicyResponse[];
   sends: SendResponse[];
   UserDecryption?: {
     MasterPasswordUnlock: MasterPasswordUnlock | null;
@@ -660,9 +660,7 @@ export interface SyncResponse {
     } | null;
     Object?: string;
   } | null;
-  // PascalCase for desktop/browser clients
   UserDecryptionOptions: UserDecryptionOptions | null;
-  // camelCase for Android client (SyncResponseJson uses @SerialName("userDecryption"))
   userDecryption: {
     masterPasswordUnlock: {
       kdf: {
@@ -677,4 +675,180 @@ export interface SyncResponse {
     } | null;
   } | null;
   object: string;
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  enabled: boolean;
+  useTotp: boolean;
+  ownerId: string;
+  billingEmail: string | null;
+  publicKey: string | null;
+  privateKey: string | null;
+  identifier: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrganizationMember {
+  organizationId: string;
+  userId: string;
+  status: number; // 0 = invited, 1 = accepted, 2 = confirmed
+  role: string; // 'owner', 'admin', 'manager', 'member', 'custom'
+  permissions: Record<string, any>;
+  collections: string[];
+  encryptedOrgKey: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Collection {
+  id: string;
+  organizationId: string;
+  name: string;
+  externalId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CollectionItem {
+  collectionId: string;
+  cipherId: string;
+}
+
+export interface OrganizationInvitation {
+  id: string;
+  organizationId: string;
+  email: string;
+  role: string;
+  permissions: Record<string, any>;
+  collections: string[];
+  invitedBy: string;
+  status: number; // 0 = pending, 1 = accepted, 2 = revoked
+  token: string;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Policy {
+  id: string;
+  organizationId: string;
+  type: number;
+  data: Record<string, any>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrganizationResponse {
+  id: string;
+  name: string;
+  enabled: boolean;
+  useTotp: boolean;
+  ownerId: string;
+  billingEmail: string | null;
+  key: string | null;
+  publicKey: string | null;
+  privateKey: string | null;
+  identifier: string | null;
+  creationDate: string;
+  revisionDate: string;
+  object: 'organization';
+}
+
+export interface OrganizationMemberResponse {
+  id: string;
+  email: string;
+  name: string | null;
+  status: number;
+  role: string;
+  permissions: Record<string, any>;
+  collections: string[];
+  encryptedOrgKey: string | null;
+  type: number;
+  hasAvatar: boolean;
+  avatarColor: string;
+  object: 'organizationMember';
+}
+
+export interface SsoConfig {
+  organizationId: string;
+  enabled: boolean;
+  identifier: string | null;
+  provider: string;
+  clientId: string | null;
+  clientSecret: string | null;
+  issuer: string | null;
+  authorizationEndpoint: string | null;
+  tokenEndpoint: string | null;
+  userinfoEndpoint: string | null;
+  jwksUri: string | null;
+  scopes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SsoConfigResponse {
+  organizationId: string;
+  enabled: boolean;
+  identifier: string | null;
+  provider: string;
+  clientId: string | null;
+  issuer: string | null;
+  authorizationEndpoint: string | null;
+  tokenEndpoint: string | null;
+  userinfoEndpoint: string | null;
+  jwksUri: string | null;
+  scopes: string | null;
+  clientSecretSet: boolean;
+  creationDate: string;
+  revisionDate: string;
+  object: 'ssoConfig';
+}
+
+export interface ScimConfig {
+  organizationId: string;
+  enabled: boolean;
+  tokenHash: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScimConfigResponse {
+  organizationId: string;
+  enabled: boolean;
+  tokenGenerated: boolean;
+  creationDate: string;
+  revisionDate: string;
+  object: 'scimConfig';
+}
+
+export interface ScimUser {
+  organizationId: string;
+  externalId: string;
+  userId: string | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CollectionResponse {
+  id: string;
+  organizationId: string;
+  name: string;
+  externalId: string | null;
+  creationDate: string;
+  revisionDate: string;
+  object: 'collection';
+}
+
+export interface PolicyResponse {
+  id: string;
+  organizationId: string;
+  type: number;
+  data: Record<string, any>;
+  creationDate: string;
+  revisionDate: string;
+  object: 'policy';
 }

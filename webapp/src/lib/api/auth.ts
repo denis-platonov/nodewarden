@@ -308,6 +308,34 @@ export async function loginWithPassword(
   return json;
 }
 
+export async function loginWithSsoCode(code: string, codeVerifier: string, redirectUri: string): Promise<TokenSuccess | TokenError> {
+  const body = new URLSearchParams();
+  body.set('grant_type', 'sso');
+  body.set('code', code);
+  body.set('code_verifier', codeVerifier);
+  body.set('redirect_uri', redirectUri);
+  body.set('scope', 'api offline_access');
+  body.set('deviceIdentifier', getOrCreateDeviceIdentifier());
+  body.set('deviceName', guessDeviceName());
+  body.set('deviceType', '14');
+
+  const resp = await fetch('/identity/connect/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      [WEB_SESSION_HEADER]: '1',
+    },
+    body: body.toString(),
+    credentials: 'same-origin',
+  });
+  return (await parseJson<TokenSuccess & TokenError>(resp)) || {};
+}
+
+export async function getSsoPrelogin(identifier: string): Promise<{ ssoAvailable: boolean; organizationId?: string; organizationName?: string; error?: string }> {
+  const resp = await fetch(`/identity/sso/prelogin?identifier=${encodeURIComponent(identifier)}`);
+  return (await parseJson<{ ssoAvailable: boolean; organizationId?: string; organizationName?: string; error?: string }>(resp)) || { ssoAvailable: false };
+}
+
 export async function getAccountPasskeyAssertionOptions(): Promise<{ options: unknown; token: string }> {
   const resp = await fetch('/identity/accounts/webauthn/assertion-options');
   if (!resp.ok) {

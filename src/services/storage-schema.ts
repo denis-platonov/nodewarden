@@ -170,6 +170,83 @@ const SCHEMA_STATEMENTS: readonly string[] = [
 
   'CREATE TABLE IF NOT EXISTS used_attachment_download_tokens (' +
   'jti TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)',
+
+  'CREATE TABLE IF NOT EXISTS organizations (' +
+  'id TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, use_totp INTEGER NOT NULL DEFAULT 0, ' +
+  'owner_id TEXT NOT NULL, billing_email TEXT, public_key TEXT, private_key TEXT, identifier TEXT, ' +
+  'created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ' +
+  'FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE)',
+  'ALTER TABLE organizations ADD COLUMN public_key TEXT',
+  'ALTER TABLE organizations ADD COLUMN private_key TEXT',
+  'ALTER TABLE organizations ADD COLUMN identifier TEXT',
+
+  'CREATE TABLE IF NOT EXISTS organization_members (' +
+  'organization_id TEXT NOT NULL, user_id TEXT NOT NULL, status INTEGER NOT NULL DEFAULT 0, role TEXT NOT NULL DEFAULT \'member\', ' +
+  'permissions TEXT NOT NULL DEFAULT \'{}\', collections TEXT, encrypted_org_key TEXT, ' +
+  'created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ' +
+  'PRIMARY KEY (organization_id, user_id), ' +
+  'FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE, ' +
+  'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)',
+  'ALTER TABLE organization_members ADD COLUMN encrypted_org_key TEXT',
+  'CREATE INDEX IF NOT EXISTS idx_organization_members_user ON organization_members(user_id)',
+
+  'CREATE TABLE IF NOT EXISTS collections (' +
+  'id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL, external_id TEXT, ' +
+  'created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ' +
+  'FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)',
+  'CREATE INDEX IF NOT EXISTS idx_collections_org ON collections(organization_id)',
+
+  'CREATE TABLE IF NOT EXISTS collection_items (' +
+  'collection_id TEXT NOT NULL, cipher_id TEXT NOT NULL, ' +
+  'PRIMARY KEY (collection_id, cipher_id), ' +
+  'FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE, ' +
+  'FOREIGN KEY (cipher_id) REFERENCES ciphers(id) ON DELETE CASCADE)',
+
+  'CREATE TABLE IF NOT EXISTS organization_invitations (' +
+  'id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL DEFAULT \'member\', ' +
+  'permissions TEXT NOT NULL DEFAULT \'{}\', collections TEXT, invited_by TEXT NOT NULL, ' +
+  'status INTEGER NOT NULL DEFAULT 0, token TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, ' +
+  'created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ' +
+  'FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE, ' +
+  'FOREIGN KEY (invited_by) REFERENCES users(id) ON DELETE CASCADE)',
+  'CREATE INDEX IF NOT EXISTS idx_org_invitations_org ON organization_invitations(organization_id)',
+  'CREATE INDEX IF NOT EXISTS idx_org_invitations_token ON organization_invitations(token)',
+  'CREATE INDEX IF NOT EXISTS idx_org_invitations_email ON organization_invitations(email)',
+
+  'CREATE TABLE IF NOT EXISTS policies (' +
+  'id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, type INTEGER NOT NULL, ' +
+  'data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ' +
+  'FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)',
+  'CREATE INDEX IF NOT EXISTS idx_policies_org ON policies(organization_id)',
+
+  'CREATE TABLE IF NOT EXISTS sso_configs (' +
+  'organization_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, identifier TEXT, provider TEXT NOT NULL DEFAULT \'oidc\', ' +
+  'client_id TEXT, client_secret TEXT, issuer TEXT, authorization_endpoint TEXT, token_endpoint TEXT, userinfo_endpoint TEXT, jwks_uri TEXT, scopes TEXT, ' +
+  'created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ' +
+  'FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)',
+
+  'CREATE TABLE IF NOT EXISTS sso_states (' +
+  'state TEXT PRIMARY KEY, organization_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, code_challenge TEXT, ' +
+  'expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, ' +
+  'FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)',
+  'CREATE INDEX IF NOT EXISTS idx_sso_states_org ON sso_states(organization_id)',
+
+  'CREATE TABLE IF NOT EXISTS sso_codes (' +
+  'code TEXT PRIMARY KEY, user_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, code_challenge TEXT, ' +
+  'expires_at INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, ' +
+  'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)',
+
+  'CREATE TABLE IF NOT EXISTS scim_configs (' +
+  'organization_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, token_hash TEXT, ' +
+  'created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ' +
+  'FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)',
+
+  'CREATE TABLE IF NOT EXISTS scim_users (' +
+  'organization_id TEXT NOT NULL, external_id TEXT NOT NULL, user_id TEXT, active INTEGER NOT NULL DEFAULT 1, ' +
+  'created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ' +
+  'PRIMARY KEY (organization_id, external_id), ' +
+  'FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)',
+  'CREATE INDEX IF NOT EXISTS idx_scim_users_org ON scim_users(organization_id)',
 ];
 
 async function executeSchemaStatement(db: D1Database, statement: string): Promise<void> {
