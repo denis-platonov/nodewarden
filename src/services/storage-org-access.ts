@@ -1,6 +1,6 @@
 import type { Cipher, OrganizationMember } from '../types';
 import { getCipher, getCiphersByCollectionIds } from './storage-cipher-repo';
-import { getOrganizationMember, canAccessAllCollections, getAccessibleCollectionsForUser } from './storage-organization-repo';
+import { getOrganizationMember, canAccessAllCollections, getAccessibleCollectionsForUser, getCollectionsForOrganization } from './storage-organization-repo';
 
 export async function getUserAccessibleCollectionIds(db: D1Database, userId: string): Promise<string[]> {
   const collections = await getAccessibleCollectionsForUser(db, userId);
@@ -54,10 +54,10 @@ export async function resolveCipherAccess(db: D1Database, userId: string, cipher
     };
   }
 
+  // An unassigned org cipher belongs to no collection, so only members with
+  // all-collection access (handled above) may see it.
   const hasAccess =
-    cipherCollectionIds.length === 0
-      ? member.collections.length > 0
-      : cipherCollectionIds.some((id) => member.collections.includes(id));
+    cipherCollectionIds.length > 0 && cipherCollectionIds.some((id) => member.collections.includes(id));
   if (!hasAccess) return null;
 
   return {
@@ -92,6 +92,17 @@ export function readOrgCipherFields(cipher: Cipher): { organizationId: string | 
 export function setOrgCipherFields(cipher: Cipher, organizationId: string | null, collectionIds: string[]): Cipher {
   (cipher as any).organizationId = organizationId;
   (cipher as any).collectionIds = collectionIds;
+  // folder_id and favorite live on the shared cipher row, but they are personal
+  // state: one member foldering or favouriting an org item would apply it to
+  // every other member. There is no per-user cipher state table, so org items
+  // carry neither.
+  if (organizationId) {
+    cipher.folderId = null;
+    cipher.favorite = false;
+    // Archive state is equally personal; an archived org item would vanish for
+    // every member.
+    (cipher as any).archivedAt = null;
+  }
   return cipher;
 }
 
@@ -110,9 +121,15 @@ export async function validateOrgCollectionsForCipher(
     if (canAccessAllCollections(member)) return { ok: true, member };
     return { ok: false, error: 'A collection is required for organization ciphers' };
   }
+  // A collection must belong to this organization AND be reachable by the user:
+  // membership in a second organization must not leak a cipher across the boundary.
+  const orgCollectionIds = new Set((await getCollectionsForOrganization(db, organizationId)).map((collection) => collection.id));
   const userCollectionIds = await getUserAccessibleCollectionIds(db, userId);
   const allowed = new Set(userCollectionIds);
   for (const collectionId of collectionIds) {
+    if (!orgCollectionIds.has(collectionId)) {
+      return { ok: false, error: 'A selected collection does not belong to this organization' };
+    }
     if (!allowed.has(collectionId)) {
       return { ok: false, error: 'You do not have access to one of the selected collections' };
     }

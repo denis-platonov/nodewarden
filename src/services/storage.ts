@@ -48,6 +48,7 @@ import {
 import {
   bulkArchiveCiphers as archiveStoredCiphers,
   bulkDeleteCiphers as deleteStoredCiphers,
+  deleteCipherById as deleteStoredCipherById,
   bulkMoveCiphers as moveStoredCiphers,
   bulkRestoreCiphers as restoreStoredCiphers,
   bulkSoftDeleteCiphers as softDeleteStoredCiphers,
@@ -66,9 +67,7 @@ import {
   bulkDeleteAttachmentsByIds as deleteStoredAttachmentsByIds,
   deleteAllAttachmentsByCipher as deleteStoredAttachmentsByCipher,
   deleteAttachment as deleteStoredAttachment,
-  deleteAttachmentForUser as deleteStoredAttachmentForUser,
   getAttachment as findStoredAttachment,
-  getAttachmentForUser as findStoredAttachmentForUser,
   getAttachmentsByCipher as listStoredAttachmentsByCipher,
   getAttachmentsByCipherIds as listStoredAttachmentsByCipherIds,
   getAttachmentsByUserId as listStoredAttachmentsByUserId,
@@ -164,7 +163,7 @@ const STORAGE_SCHEMA_VERSION_KEY = 'schema.version';
 // Bump this whenever src/services/storage-schema.ts or migrations/0001_init.sql
 // changes. Existing D1 installs only rerun ensureStorageSchema() when this value
 // differs from config.schema.version.
-const STORAGE_SCHEMA_VERSION = '2026-07-27-organizations-collections';
+const STORAGE_SCHEMA_VERSION = '2026-08-28-sso-nonce';
 const REQUIRED_SCHEMA_TABLES = ['webauthn_credentials', 'webauthn_challenges', 'auth_requests', 'totp_login_replays'] as const;
 
 // D1-backed storage.
@@ -495,6 +494,11 @@ export class StorageService {
     await deleteStoredCipher(this.db, id, userId);
   }
 
+  // Only for callers that already verified access (resolveCipherAccess).
+  async deleteCipherById(id: string): Promise<void> {
+    await deleteStoredCipherById(this.db, id);
+  }
+
   async bulkSoftDeleteCiphers(ids: string[], userId: string): Promise<string | null> {
     return softDeleteStoredCiphers(this.db, this.sqlChunkSize.bind(this), this.updateRevisionDate.bind(this), ids, userId);
   }
@@ -579,20 +583,12 @@ export class StorageService {
     return findStoredAttachment(this.db, id);
   }
 
-  async getAttachmentForUser(id: string, userId: string): Promise<Attachment | null> {
-    return findStoredAttachmentForUser(this.db, id, userId);
-  }
-
   async saveAttachment(attachment: Attachment): Promise<void> {
     await saveStoredAttachment(this.db, this.safeBind.bind(this), attachment);
   }
 
   async deleteAttachment(id: string): Promise<void> {
     await deleteStoredAttachment(this.db, id);
-  }
-
-  async deleteAttachmentForUser(id: string, userId: string): Promise<void> {
-    await deleteStoredAttachmentForUser(this.db, id, userId);
   }
 
   async bulkDeleteAttachmentsByIds(ids: string[]): Promise<void> {

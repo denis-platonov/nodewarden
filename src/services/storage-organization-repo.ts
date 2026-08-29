@@ -163,6 +163,26 @@ export function isOrgOwner(member: OrganizationMember | null | undefined): boole
   return member.role === 'owner';
 }
 
+const ORG_ROLE_RANK: Record<string, number> = {
+  owner: 4,
+  admin: 3,
+  manager: 2,
+  member: 1,
+  custom: 1,
+};
+
+export function orgRoleRank(role: unknown): number {
+  return ORG_ROLE_RANK[String(role || '').trim().toLowerCase()] ?? 0;
+}
+
+// A member may only grant roles at or below their own rank, so a manager cannot
+// mint an admin and an admin cannot mint an owner.
+export function canAssignOrgRole(actor: OrganizationMember | null | undefined, role: unknown): boolean {
+  if (!actor || actor.status !== 1) return false;
+  const rank = orgRoleRank(role);
+  return rank > 0 && rank <= orgRoleRank(actor.role);
+}
+
 export function canAccessAllCollections(member: OrganizationMember | null | undefined): boolean {
   if (!member || member.status !== 1) return false;
   return member.role === 'owner' || member.role === 'admin' || member.role === 'manager';
@@ -262,8 +282,23 @@ export async function saveCollection(db: D1Database, collection: Collection): Pr
     .run();
 }
 
-export async function deleteCollection(db: D1Database, id: string): Promise<void> {
+// Also strips the collection from every member's access list, so a deleted
+// collection cannot linger as a stale id. Returns the members that changed.
+export async function deleteCollection(db: D1Database, id: string): Promise<string[]> {
+  const collection = await getCollection(db, id);
   await db.prepare('DELETE FROM collections WHERE id = ?').bind(id).run();
+  if (!collection) return [];
+
+  const affected: string[] = [];
+  for (const member of await getOrganizationMembers(db, collection.organizationId)) {
+    const collections = member.collections || [];
+    if (!collections.includes(id)) continue;
+    member.collections = collections.filter((collectionId) => collectionId !== id);
+    member.updatedAt = new Date().toISOString();
+    await saveOrganizationMember(db, member);
+    affected.push(member.userId);
+  }
+  return affected;
 }
 
 export async function addCollectionItem(db: D1Database, collectionId: string, cipherId: string): Promise<void> {
@@ -319,6 +354,15 @@ export async function getOrganizationInvitations(db: D1Database, organizationId:
   const res = await db
     .prepare('SELECT id, organization_id, email, role, permissions, collections, invited_by, status, token, expires_at, created_at, updated_at FROM organization_invitations WHERE organization_id = ? ORDER BY created_at DESC')
     .bind(organizationId)
+    .all<any>();
+  return (res.results || []).map(mapInvitationRow);
+}
+
+// Invitations addressed to one person, across every organization.
+export async function getOrganizationInvitationsForEmail(db: D1Database, email: string): Promise<OrganizationInvitation[]> {
+  const res = await db
+    .prepare('SELECT id, organization_id, email, role, permissions, collections, invited_by, status, token, expires_at, created_at, updated_at FROM organization_invitations WHERE email = ? COLLATE NOCASE ORDER BY created_at DESC')
+    .bind(email.toLowerCase())
     .all<any>();
   return (res.results || []).map(mapInvitationRow);
 }
@@ -379,4 +423,71 @@ export async function savePolicy(db: D1Database, policy: Policy): Promise<void> 
 
 export async function deletePolicy(db: D1Database, id: string): Promise<void> {
   await db.prepare('DELETE FROM policies WHERE id = ?').bind(id).run();
+}
+
+// Both `organizations.owner_id` and `ciphers.user_id` cascade from `users`, so
+// deleting an account would otherwise destroy an organization it owns and every
+// org cipher it authored. Hand that data to a surviving member first. Returns the
+// member ids whose sync state was affected.
+export async function transferOrganizationDataOnUserDelete(db: D1Database, userId: string): Promise<string[]> {
+  const affected = new Set<string>();
+  const now = new Date().toISOString();
+
+  // 1. Organizations owned by the account move to the highest-ranked remaining
+  //    member; an organization with no other members is removed outright.
+  const owned = await db
+    .prepare('SELECT id FROM organizations WHERE owner_id = ?')
+    .bind(userId)
+    .all<{ id: string }>();
+  for (const row of owned.results || []) {
+    const members = (await getOrganizationMembers(db, row.id)).filter(
+      (member) => member.userId !== userId && member.status === 1
+    );
+    members.sort((a, b) => orgRoleRank(b.role) - orgRoleRank(a.role) || a.createdAt.localeCompare(b.createdAt));
+    const successor = members[0];
+    if (!successor) {
+      await deleteOrganization(db, row.id);
+      continue;
+    }
+    await db
+      .prepare('UPDATE organizations SET owner_id = ?, updated_at = ? WHERE id = ?')
+      .bind(successor.userId, now, row.id)
+      .run();
+    successor.role = 'owner';
+    successor.updatedAt = now;
+    await saveOrganizationMember(db, successor);
+    for (const member of members) affected.add(member.userId);
+  }
+
+  // 2. Org ciphers the account authored are reassigned to the (possibly new) owner
+  //    so they survive the cascade.
+  const memberships = await db
+    .prepare('SELECT organization_id FROM organization_members WHERE user_id = ?')
+    .bind(userId)
+    .all<{ organization_id: string }>();
+  for (const row of memberships.results || []) {
+    const org = await getOrganization(db, row.organization_id);
+    if (!org || org.ownerId === userId) continue;
+    // Match both collection-linked org ciphers AND unassigned ones (admins may
+    // create org ciphers with no collection) — the latter would otherwise
+    // cascade-delete with the account.
+    await db
+      .prepare(
+        `UPDATE ciphers SET user_id = ?, updated_at = ?
+         WHERE user_id = ? AND (
+           id IN (
+             SELECT ci.cipher_id FROM collection_items ci
+             JOIN collections c ON c.id = ci.collection_id
+             WHERE c.organization_id = ?
+           )
+           OR (json_valid(data) AND json_extract(data, '$.organizationId') = ?)
+         )`
+      )
+      .bind(org.ownerId, now, userId, org.id, org.id)
+      .run();
+    for (const member of await getOrganizationMemberIds(db, org.id)) affected.add(member);
+  }
+
+  affected.delete(userId);
+  return Array.from(affected);
 }

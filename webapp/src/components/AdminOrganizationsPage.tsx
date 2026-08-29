@@ -16,12 +16,17 @@ import {
   updateCollection,
   deleteCollection,
   getMemberPublicKeyByEmail,
+  listMyInvitations,
+  acceptMyInvitation,
+  declineMyInvitation,
+  getMemberPublicKey,
   getSsoConfig,
   saveSsoConfig,
   getScimConfig,
   saveScimConfig,
   type OrganizationSummary,
   type OrganizationMemberItem,
+  type MyInvitationItem,
   type OrganizationInvitationItem,
   type CollectionItem,
   type SsoConfigItem,
@@ -55,6 +60,9 @@ export default function AdminOrganizationsPage(props: AdminOrganizationsPageProp
   const [creatingOrg, setCreatingOrg] = useState(false);
 
   const [members, setMembers] = useState<OrganizationMemberItem[]>([]);
+  const [sharingKeyFor, setSharingKeyFor] = useState<string | null>(null);
+  const [myInvitations, setMyInvitations] = useState<MyInvitationItem[]>([]);
+  const [invitationBusy, setInvitationBusy] = useState<string | null>(null);
   const [invitations, setInvitations] = useState<OrganizationInvitationItem[]>([]);
   const [collections, setCollections] = useState<CollectionItem[]>([]);
   const [ssoConfig, setSsoConfig] = useState<SsoConfigItem | null>(null);
@@ -72,14 +80,38 @@ export default function AdminOrganizationsPage(props: AdminOrganizationsPageProp
 
   const refreshOrgs = useCallback(async () => {
     try {
-      const data = await listOrganizations(authedFetch);
+      const [data, invitations] = await Promise.all([
+        listOrganizations(authedFetch),
+        listMyInvitations(authedFetch).catch(() => [] as MyInvitationItem[]),
+      ]);
       setOrgs(data);
+      setMyInvitations(invitations);
     } catch (error) {
       onNotify('error', error instanceof Error ? error.message : t('txt_orgs_load_failed'));
     } finally {
       setLoading(false);
     }
   }, [authedFetch, onNotify]);
+
+  // An invitation is only actionable by the person it was addressed to, so this
+  // is the one place it can be accepted or turned down.
+  async function handleInvitationResponse(invitation: MyInvitationItem, accept: boolean) {
+    setInvitationBusy(invitation.id);
+    try {
+      if (accept) {
+        await acceptMyInvitation(authedFetch, invitation.token);
+        onNotify('success', t('txt_org_invitation_accepted'));
+      } else {
+        await declineMyInvitation(authedFetch, invitation.token);
+        onNotify('success', t('txt_org_invitation_declined'));
+      }
+      await refreshOrgs();
+    } catch (error) {
+      onNotify('error', error instanceof Error ? error.message : t('txt_org_invitation_action_failed'));
+    } finally {
+      setInvitationBusy(null);
+    }
+  }
 
   useEffect(() => {
     void refreshOrgs();
@@ -180,6 +212,29 @@ export default function AdminOrganizationsPage(props: AdminOrganizationsPageProp
     }
   }
 
+  // Members who joined through an invitation or SSO have no copy of the org key
+  // yet, so they cannot decrypt anything until an admin re-encrypts it for them.
+  async function handleShareKey(member: OrganizationMemberItem) {
+    if (!selectedOrg || !profile) return;
+    setSharingKeyFor(member.id);
+    try {
+      const orgKeyBytes = await deriveOrgKeyBytes(profile, sessionSymEncKey || '', sessionSymMacKey || '', selectedOrg.id);
+      if (!orgKeyBytes) {
+        onNotify('error', t('txt_org_key_unavailable'));
+        return;
+      }
+      const target = await getMemberPublicKey(authedFetch, selectedOrg.id, member.id);
+      const encryptedOrgKey = await encryptOrgKeyForMember(orgKeyBytes, target.publicKey);
+      await updateOrganizationMember(authedFetch, selectedOrg.id, member.id, { encryptedOrgKey });
+      onNotify('success', t('txt_org_key_shared'));
+      await refreshDetail(selectedOrg.id);
+    } catch (error) {
+      onNotify('error', error instanceof Error ? error.message : t('txt_org_key_share_failed'));
+    } finally {
+      setSharingKeyFor(null);
+    }
+  }
+
   async function handleRemoveMember(memberId: string) {
     if (!selectedOrg) return;
     try {
@@ -259,6 +314,54 @@ export default function AdminOrganizationsPage(props: AdminOrganizationsPageProp
     return (
       <div className="card stack">
         <div className="settings-section-stack">
+          {myInvitations.length > 0 ? (
+            <section className="settings-submodule">
+              <div className="settings-submodule-header">
+                <div>
+                  <h2>{t('txt_org_invitations_for_you')}</h2>
+                  <p className="muted">{t('txt_org_invitations_for_you_help')}</p>
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>{t('txt_organization')}</th>
+                      <th>{t('txt_org_role')}</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {myInvitations.map((invitation) => (
+                      <tr key={invitation.id}>
+                        <td>{invitation.organizationName}</td>
+                        <td>{invitation.role}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
+                            disabled={invitationBusy === invitation.id}
+                            onClick={() => void handleInvitationResponse(invitation, true)}
+                          >
+                            {t('txt_org_invitation_accept')}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            disabled={invitationBusy === invitation.id}
+                            onClick={() => void handleInvitationResponse(invitation, false)}
+                          >
+                            {t('txt_org_invitation_decline')}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
+
           <section className="settings-submodule">
             <div className="settings-submodule-header">
               <div>
@@ -464,6 +567,18 @@ export default function AdminOrganizationsPage(props: AdminOrganizationsPageProp
                       <td>{member.status === 1 ? t('txt_active') : t('txt_pending')}</td>
                       {manageEnabled ? (
                         <td>
+                          {!member.encryptedOrgKey ? (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              title={t('txt_org_key_missing_hint')}
+                              disabled={sharingKeyFor === member.id}
+                              onClick={() => void handleShareKey(member)}
+                            >
+                              <KeyRound size={14} className="btn-icon" />
+                              {sharingKeyFor === member.id ? t('txt_saving') : t('txt_org_share_key')}
+                            </button>
+                          ) : null}
                           {member.role !== 'owner' ? (
                             <button type="button" className="btn btn-danger btn-sm" onClick={() => void handleRemoveMember(member.id)}>
                               <Trash2 size={14} className="btn-icon" />

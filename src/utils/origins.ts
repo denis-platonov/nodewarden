@@ -65,3 +65,46 @@ export function isConfiguredWebAuthnAllowedOrigin(
   const normalized = normalizeOrigin(origin);
   return !!normalized && getConfiguredWebAuthnAllowedOrigins(env).includes(normalized);
 }
+
+// Origins that may receive an SSO authorization code. The server's own origin is
+// always allowed (the bundled web vault redirects to itself); other clients must
+// be added explicitly via SSO_ALLOWED_REDIRECT_ORIGINS.
+export function getConfiguredSsoRedirectOrigins(
+  env: Pick<Env, 'SSO_ALLOWED_REDIRECT_ORIGINS'>
+): string[] {
+  const seen = new Set<string>();
+  for (const item of String(env.SSO_ALLOWED_REDIRECT_ORIGINS || '').split(',')) {
+    const origin = normalizeOrigin(item);
+    if (origin) seen.add(origin);
+  }
+  return Array.from(seen);
+}
+
+// An SSO redirect_uri is only accepted when it is absolute, carries no credentials
+// or fragment, and its origin is allowlisted. Never redirect to an unvalidated URI:
+// the authorization code is appended to it.
+export function isAllowedSsoRedirectUri(
+  env: Pick<Env, 'SSO_ALLOWED_REDIRECT_ORIGINS'>,
+  requestOrigin: string,
+  redirectUri: unknown
+): boolean {
+  const raw = String(redirectUri || '').trim();
+  if (!raw) return false;
+
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (!url.protocol || !url.host) return false;
+  if (url.username || url.password) return false;
+  if (url.hash) return false;
+
+  const allowed = new Set<string>();
+  const own = normalizeOrigin(requestOrigin);
+  if (own) allowed.add(own);
+  for (const origin of getConfiguredSsoRedirectOrigins(env)) allowed.add(origin);
+
+  return allowed.has(`${url.protocol}//${url.host}`);
+}

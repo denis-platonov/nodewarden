@@ -14,13 +14,15 @@ import {
   deleteSsoState,
   saveSsoCode,
   getSsoCode,
-  markSsoCodeUsed,
+  claimSsoCode,
   deleteSsoCode,
   pruneSsoStates,
   pruneSsoCodes,
 } from '../services/storage-sso-repo';
 import { generateUUID } from '../utils/uuid';
 import { bytesToBase64Url } from '../utils/passkey';
+import { isAllowedSsoRedirectUri } from '../utils/origins';
+import { verifyIdToken, readIdTokenEmail } from '../utils/oidc';
 import { safeWriteAuditEvent } from '../services/audit-events';
 import { bumpUserRevisions } from '../utils/revision';
 
@@ -68,33 +70,53 @@ interface OidcEndpoints {
   authorizationEndpoint: string;
   tokenEndpoint: string;
   userinfoEndpoint: string;
+  jwksUri: string;
+  issuer: string;
 }
 
-async function resolveOidcEndpoints(config: SsoConfig, request: Request): Promise<OidcEndpoints | null> {
-  if (config.authorizationEndpoint && config.tokenEndpoint && config.userinfoEndpoint) {
-    return {
-      authorizationEndpoint: config.authorizationEndpoint,
-      tokenEndpoint: config.tokenEndpoint,
-      userinfoEndpoint: config.userinfoEndpoint,
-    };
-  }
-  if (!config.issuer) return null;
-
-  let issuer = config.issuer.trim();
+async function fetchOidcDiscovery(issuerValue: string): Promise<Record<string, unknown> | null> {
+  let issuer = issuerValue.trim();
   if (!/^https?:\/\//i.test(issuer)) issuer = `https://${issuer}`;
   const discoveryUrl = `${issuer.replace(/\/+$/, '')}/.well-known/openid-configuration`;
   try {
     const response = await fetch(discoveryUrl, { signal: AbortSignal.timeout(10_000) });
     if (!response.ok) return null;
-    const document = await response.json() as Record<string, unknown>;
-    return {
-      authorizationEndpoint: String(document.authorization_endpoint || ''),
-      tokenEndpoint: String(document.token_endpoint || ''),
-      userinfoEndpoint: String(document.userinfo_endpoint || ''),
-    };
+    return await response.json() as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+async function resolveOidcEndpoints(config: SsoConfig, request: Request): Promise<OidcEndpoints | null> {
+  void request;
+  if (config.authorizationEndpoint && config.tokenEndpoint && config.userinfoEndpoint) {
+    let jwksUri = config.jwksUri || '';
+    // A manually configured org may omit jwksUri (the field predates ID token
+    // verification); fill it from discovery when an issuer is available so
+    // verification can still run.
+    if (!jwksUri && config.issuer) {
+      const document = await fetchOidcDiscovery(config.issuer);
+      jwksUri = String(document?.jwks_uri || '');
+    }
+    return {
+      authorizationEndpoint: config.authorizationEndpoint,
+      tokenEndpoint: config.tokenEndpoint,
+      userinfoEndpoint: config.userinfoEndpoint,
+      jwksUri,
+      issuer: config.issuer || '',
+    };
+  }
+  if (!config.issuer) return null;
+
+  const document = await fetchOidcDiscovery(config.issuer);
+  if (!document) return null;
+  return {
+    authorizationEndpoint: String(document.authorization_endpoint || ''),
+    tokenEndpoint: String(document.token_endpoint || ''),
+    userinfoEndpoint: String(document.userinfo_endpoint || ''),
+    jwksUri: config.jwksUri || String(document.jwks_uri || ''),
+    issuer: String(document.issuer || config.issuer || ''),
+  };
 }
 
 async function exchangeAuthorizationCode(
@@ -102,8 +124,8 @@ async function exchangeAuthorizationCode(
   endpoints: OidcEndpoints,
   code: string,
   callbackUri: string
-): Promise<{ accessToken: string | null; userinfo: Record<string, unknown> | null }> {
-  if (!config.clientId) return { accessToken: null, userinfo: null };
+): Promise<{ accessToken: string | null; idToken: string | null; userinfo: Record<string, unknown> | null }> {
+  if (!config.clientId) return { accessToken: null, idToken: null, userinfo: null };
 
   const body = new URLSearchParams();
   body.set('grant_type', 'authorization_code');
@@ -119,20 +141,21 @@ async function exchangeAuthorizationCode(
       body,
       signal: AbortSignal.timeout(15_000),
     });
-    if (!tokenResponse.ok) return { accessToken: null, userinfo: null };
+    if (!tokenResponse.ok) return { accessToken: null, idToken: null, userinfo: null };
     const tokenJson = await tokenResponse.json() as Record<string, unknown>;
     const accessToken = String(tokenJson.access_token || '');
-    if (!accessToken) return { accessToken: null, userinfo: null };
+    const idToken = String(tokenJson.id_token || '') || null;
+    if (!accessToken) return { accessToken: null, idToken, userinfo: null };
 
     const userinfoResponse = await fetch(endpoints.userinfoEndpoint, {
       headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!userinfoResponse.ok) return { accessToken: null, userinfo: null };
+    if (!userinfoResponse.ok) return { accessToken: null, idToken, userinfo: null };
     const userinfo = await userinfoResponse.json() as Record<string, unknown>;
-    return { accessToken, userinfo };
+    return { accessToken, idToken, userinfo };
   } catch {
-    return { accessToken: null, userinfo: null };
+    return { accessToken: null, idToken: null, userinfo: null };
   }
 }
 
@@ -302,12 +325,6 @@ export async function handleSsoAuthorize(request: Request, env: Env): Promise<Re
   const origin = url.origin;
   const callbackUri = `${origin}/identity/sso/callback`;
 
-  const redirectError = (error: string, description: string): Response =>
-    Response.redirect(
-      `${redirectUri}${redirectUri.includes('?') ? '&' : '?'}error=${encodeURIComponent(error)}&error_description=${encodeURIComponent(description)}${state ? `&state=${encodeURIComponent(state)}` : ''}`,
-      302
-    );
-
   if (clientId !== 'web' && clientId !== 'browser') {
     return jsonResponse({ error: 'unsupported_client', error_description: 'SSO is only supported for the web vault' }, 400);
   }
@@ -317,6 +334,18 @@ export async function handleSsoAuthorize(request: Request, env: Env): Promise<Re
   if (!redirectUri || !state || !codeChallenge || !identifier) {
     return jsonResponse({ error: 'invalid_request', error_description: 'redirect_uri, state, code_challenge and identifier are required' }, 400);
   }
+
+  // The authorization code is handed to redirect_uri, so an unvalidated target is
+  // an account takeover. Report the failure in-band instead of redirecting to it.
+  if (!isAllowedSsoRedirectUri(env, origin, redirectUri)) {
+    return jsonResponse({ error: 'invalid_request', error_description: 'redirect_uri is not an allowed callback target' }, 400);
+  }
+
+  const redirectError = (error: string, description: string): Response =>
+    Response.redirect(
+      `${redirectUri}${redirectUri.includes('?') ? '&' : '?'}error=${encodeURIComponent(error)}&error_description=${encodeURIComponent(description)}${state ? `&state=${encodeURIComponent(state)}` : ''}`,
+      302
+    );
 
   const config = await getSsoConfigByIdentifier(env.DB, identifier);
   if (!config || !config.enabled) {
@@ -333,12 +362,14 @@ export async function handleSsoAuthorize(request: Request, env: Env): Promise<Re
   }
 
   const nowMs = Date.now();
+  const nonce = generateUUID() + generateUUID();
   await pruneSsoStates(env.DB, nowMs);
   await saveSsoState(env.DB, {
     state,
     organizationId: org.id,
     redirectUri,
     codeChallenge,
+    nonce,
     expiresAt: nowMs + SSO_STATE_TTL_MS,
     createdAt: nowMs,
   });
@@ -352,6 +383,7 @@ export async function handleSsoAuthorize(request: Request, env: Env): Promise<Re
   authorizeUrl.searchParams.set('state', state);
   authorizeUrl.searchParams.set('code_challenge', codeChallenge);
   authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+  authorizeUrl.searchParams.set('nonce', nonce);
 
   return Response.redirect(authorizeUrl.toString(), 302);
 }
@@ -380,6 +412,13 @@ export async function handleSsoCallback(request: Request, env: Env): Promise<Res
     return jsonResponse({ error: 'invalid_grant', error_description: 'The SSO request has expired. Try again.' }, 400);
   }
 
+  // Re-check the stored target: rows persisted before the allowlist existed, or by
+  // any other writer, must never receive a code.
+  if (!isAllowedSsoRedirectUri(env, origin, ssoState.redirectUri)) {
+    await deleteSsoState(env.DB, state);
+    return jsonResponse({ error: 'invalid_request', error_description: 'redirect_uri is not an allowed callback target' }, 400);
+  }
+
   const config = await getSsoConfig(env.DB, ssoState.organizationId);
   if (!config || !config.enabled) {
     await deleteSsoState(env.DB, state);
@@ -392,7 +431,41 @@ export async function handleSsoCallback(request: Request, env: Env): Promise<Res
     return failRedirect(ssoState.redirectUri, state, 'server_error', 'Identity provider endpoints could not be resolved');
   }
 
-  const { userinfo } = await exchangeAuthorizationCode(config, endpoints, code, callbackUri);
+  const { idToken, userinfo } = await exchangeAuthorizationCode(config, endpoints, code, callbackUri);
+
+  // The ID token is the provider's signed assertion. When one is issued we must
+  // verify it: a userinfo body alone proves only that a bearer token was accepted.
+  let idTokenEmail: string | null = null;
+  if (idToken && !endpoints.jwksUri) {
+    // No signing keys are resolvable (manual config without jwksUri and no
+    // usable discovery). Proceed on the userinfo flow — the token exchange is a
+    // server-to-server call to the configured endpoint — but leave an audit
+    // trail that verification was skipped.
+    await writeSsoAudit(env, 'unknown', 'sso.login.unverified_id_token', {
+      organizationId: ssoState.organizationId,
+      reason: 'jwks_uri_missing',
+      ssoProvider: config.provider,
+    });
+  }
+  if (idToken && endpoints.jwksUri) {
+    const verification = await verifyIdToken(idToken, {
+      jwksUri: endpoints.jwksUri,
+      clientId: config.clientId || '',
+      issuer: endpoints.issuer || config.issuer,
+      nonce: ssoState.nonce,
+    });
+    if (!verification.ok || !verification.claims) {
+      await deleteSsoState(env.DB, state);
+      await writeSsoAudit(env, 'unknown', 'sso.login.failed', {
+        organizationId: ssoState.organizationId,
+        reason: verification.reason || 'id_token_invalid',
+        ssoProvider: config.provider,
+      });
+      return failRedirect(ssoState.redirectUri, state, 'access_denied', 'The identity provider response could not be verified');
+    }
+    idTokenEmail = readIdTokenEmail(verification.claims);
+  }
+
   if (!userinfo) {
     await deleteSsoState(env.DB, state);
     await writeSsoAudit(env, 'unknown', 'sso.login.failed', {
@@ -403,7 +476,17 @@ export async function handleSsoCallback(request: Request, env: Env): Promise<Res
     return failRedirect(ssoState.redirectUri, state, 'access_denied', 'The identity provider rejected the login request');
   }
 
-  const email = readUserinfoEmail(userinfo);
+  const userinfoEmail = readUserinfoEmail(userinfo);
+  if (idTokenEmail && userinfoEmail && idTokenEmail !== userinfoEmail) {
+    await deleteSsoState(env.DB, state);
+    await writeSsoAudit(env, 'unknown', 'sso.login.failed', {
+      organizationId: ssoState.organizationId,
+      reason: 'email_mismatch',
+      ssoProvider: config.provider,
+    });
+    return failRedirect(ssoState.redirectUri, state, 'access_denied', 'The identity provider returned inconsistent account details');
+  }
+  const email = idTokenEmail || userinfoEmail;
   if (!email) {
     await deleteSsoState(env.DB, state);
     await writeSsoAudit(env, 'unknown', 'sso.login.failed', {
@@ -471,22 +554,29 @@ export async function validateSsoCode(
     await deleteSsoCode(env.DB, code);
     return { error: 'SSO code has expired' };
   }
-  if (redirectUri && ssoCode.redirectUri !== redirectUri) {
+  // Both bindings are mandatory: every code this server mints carries a
+  // redirect_uri and a PKCE challenge, so omitting either from the token
+  // request must fail rather than silently skip the check.
+  if (!redirectUri || ssoCode.redirectUri !== redirectUri) {
     return { error: 'redirect_uri mismatch' };
   }
-  if (ssoCode.codeChallenge) {
-    if (!codeVerifier) return { error: 'code_verifier is required' };
-    const expectedChallenge = await sha256Base64Url(codeVerifier);
-    if (expectedChallenge !== ssoCode.codeChallenge) {
-      return { error: 'code_verifier mismatch' };
-    }
+  if (!ssoCode.codeChallenge) {
+    return { error: 'SSO code is missing its PKCE binding' };
+  }
+  if (!codeVerifier) return { error: 'code_verifier is required' };
+  const expectedChallenge = await sha256Base64Url(codeVerifier);
+  if (expectedChallenge !== ssoCode.codeChallenge) {
+    return { error: 'code_verifier mismatch' };
   }
 
+  // Claim before loading the account: the UPDATE is the single-use lock.
+  const claimed = await claimSsoCode(env.DB, code);
+  if (!claimed) return { error: 'SSO code has already been used' };
+
   const user = await getUserById(env.DB, ssoCode.userId);
+  await deleteSsoCode(env.DB, code);
   if (!user) return { error: 'Account not found' };
   if (user.status !== 'active') return { error: 'Account is disabled' };
 
-  await markSsoCodeUsed(env.DB, code);
-  await deleteSsoCode(env.DB, code);
   return { user };
 }

@@ -3,6 +3,9 @@ import { AuthService } from '../services/auth';
 import { StorageService } from '../services/storage';
 import { jsonResponse, errorResponse } from '../utils/response';
 import { deleteBlobObject, getAttachmentObjectKey, getSendFileObjectKey } from '../services/blob-store';
+import { transferOrganizationDataOnUserDelete } from '../services/storage-organization-repo';
+import { bumpUserRevisions } from '../utils/revision';
+import { readActingDeviceIdentifier } from '../utils/device';
 import { auditRequestMetadata, getAuditLogSettings, normalizeAuditLogSettings, saveAuditLogSettings, writeAuditEvent } from '../services/audit-events';
 
 function isAdmin(user: User): boolean {
@@ -415,6 +418,10 @@ export async function handleAdminDeleteUser(
 
   // Clean up R2 files before DB cascade deletes the metadata rows.
   // 1. Attachment files (keyed by cipherId/attachmentId)
+  // Transfer org ownership and org ciphers FIRST: the attachment purge below is
+  // keyed by cipher user_id, and transferred org ciphers must keep their blobs.
+  const affectedMemberIds = await transferOrganizationDataOnUserDelete(env.DB, target.id);
+
   const attachmentMap = await storage.getAttachmentsByUserId(target.id);
   for (const [cipherId, attachments] of attachmentMap) {
     for (const att of attachments) {
@@ -437,6 +444,7 @@ export async function handleAdminDeleteUser(
 
   await storage.deleteRefreshTokensByUserId(target.id);
   await storage.deleteUserById(target.id);
+  await bumpUserRevisions(env, affectedMemberIds, readActingDeviceIdentifier(request));
   AuthService.invalidateUserCache(target.id);
   await writeAuditLog(storage, actorUser.id, 'admin.user.delete', 'user', target.id, {
     targetEmail: target.email,

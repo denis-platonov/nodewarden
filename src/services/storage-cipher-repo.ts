@@ -152,6 +152,19 @@ export async function deleteCipher(db: D1Database, id: string, userId: string): 
   await db.prepare('DELETE FROM ciphers WHERE id = ? AND user_id = ?').bind(id, userId).run();
 }
 
+// Unscoped delete for callers that already resolved access via resolveCipherAccess
+// (an org cipher's user_id is its author, not necessarily the caller).
+export async function deleteCipherById(db: D1Database, id: string): Promise<void> {
+  await db.prepare('DELETE FROM ciphers WHERE id = ?').bind(id).run();
+}
+
+// Owner-scoped bulk mutations must only touch personal ciphers: an org cipher's
+// user_id is merely its author, who may have left the organization. Org ciphers
+// are mutated through the access-checked per-cipher paths instead.
+export const PERSONAL_CIPHER_ONLY =
+  "AND json_extract(data, '$.organizationId') IS NULL " +
+  'AND id NOT IN (SELECT cipher_id FROM collection_items)';
+
 export async function bulkSoftDeleteCiphers(
   db: D1Database,
   sqlChunkSize: SqlChunkSize,
@@ -174,7 +187,8 @@ export async function bulkSoftDeleteCiphers(
         `UPDATE ciphers
          SET deleted_at = ?, updated_at = ?,
              data = json_remove(data, '$.deletedAt', '$.deletedDate', '$.updatedAt', '$.revisionDate')
-         WHERE user_id = ? AND id IN (${placeholders})`
+         WHERE user_id = ? AND id IN (${placeholders})
+           ${PERSONAL_CIPHER_ONLY}`
       )
       .bind(now, now, userId, ...chunk)
       .run();
@@ -205,7 +219,8 @@ export async function bulkRestoreCiphers(
         `UPDATE ciphers
          SET deleted_at = NULL, updated_at = ?,
              data = json_remove(data, '$.deletedAt', '$.deletedDate', '$.updatedAt', '$.revisionDate')
-         WHERE user_id = ? AND id IN (${placeholders})`
+         WHERE user_id = ? AND id IN (${placeholders})
+           ${PERSONAL_CIPHER_ONLY}`
       )
       .bind(now, userId, ...chunk)
       .run();
@@ -229,7 +244,7 @@ export async function bulkDeleteCiphers(
   for (let i = 0; i < uniqueIds.length; i += chunkSize) {
     const chunk = uniqueIds.slice(i, i + chunkSize);
     const placeholders = chunk.map(() => '?').join(',');
-    await db.prepare(`DELETE FROM ciphers WHERE user_id = ? AND id IN (${placeholders})`).bind(userId, ...chunk).run();
+    await db.prepare(`DELETE FROM ciphers WHERE user_id = ? AND id IN (${placeholders}) ${PERSONAL_CIPHER_ONLY}`).bind(userId, ...chunk).run();
   }
 
   return updateRevisionDate(userId);
@@ -357,7 +372,8 @@ export async function bulkMoveCiphers(
         `UPDATE ciphers
          SET folder_id = ?, updated_at = ?,
              data = json_remove(data, '$.folderId', '$.folder_id', '$.updatedAt', '$.revisionDate')
-         WHERE user_id = ? AND id IN (${placeholders})`
+         WHERE user_id = ? AND id IN (${placeholders})
+           ${PERSONAL_CIPHER_ONLY}`
       )
       .bind(normalizedFolderId, now, userId, ...chunk)
       .run();
@@ -389,6 +405,7 @@ export async function bulkArchiveCiphers(
          SET archived_at = ?, updated_at = ?,
              data = json_remove(data, '$.archivedAt', '$.archivedDate', '$.updatedAt', '$.revisionDate')
          WHERE user_id = ? AND id IN (${placeholders})
+           ${PERSONAL_CIPHER_ONLY}
            AND deleted_at IS NULL
            AND json_extract(data, '$.deletedAt') IS NULL
            AND json_extract(data, '$.deletedDate') IS NULL`
@@ -422,7 +439,8 @@ export async function bulkUnarchiveCiphers(
         `UPDATE ciphers
          SET archived_at = NULL, updated_at = ?,
              data = json_remove(data, '$.archivedAt', '$.archivedDate', '$.updatedAt', '$.revisionDate')
-         WHERE user_id = ? AND id IN (${placeholders})`
+         WHERE user_id = ? AND id IN (${placeholders})
+           ${PERSONAL_CIPHER_ONLY}`
       )
       .bind(now, userId, ...chunk)
       .run();

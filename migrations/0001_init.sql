@@ -34,6 +34,12 @@ CREATE TABLE IF NOT EXISTS users (
   verify_devices INTEGER NOT NULL DEFAULT 0,
   totp_secret TEXT,
   totp_recovery_code TEXT,
+  yubikey_key1 TEXT,
+  yubikey_key2 TEXT,
+  yubikey_key3 TEXT,
+  yubikey_key4 TEXT,
+  yubikey_key5 TEXT,
+  yubikey_nfc INTEGER NOT NULL DEFAULT 0,
   api_key TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -401,6 +407,7 @@ CREATE TABLE IF NOT EXISTS sso_states (
   organization_id TEXT NOT NULL,
   redirect_uri TEXT NOT NULL,
   code_challenge TEXT,
+  nonce TEXT,
   expires_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE

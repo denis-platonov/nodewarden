@@ -106,6 +106,12 @@ export async function getMemberPublicKeyByEmail(authedFetch: AuthedFetch, orgId:
   return resp.json();
 }
 
+export async function getMemberPublicKey(authedFetch: AuthedFetch, orgId: string, memberId: string): Promise<{ publicKey: string }> {
+  const resp = await authedFetch(`/api/organizations/${orgId}/members/${memberId}/public-key`);
+  if (!resp.ok) throw new Error(await parseErrorMessage(resp, 'Organization request failed'));
+  return resp.json();
+}
+
 export async function inviteOrganizationMember(authedFetch: AuthedFetch, orgId: string, body: Record<string, unknown>): Promise<OrganizationMemberItem | OrganizationInvitationItem> {
   const resp = await authedFetch(`/api/organizations/${orgId}/members/invite`, {
     method: 'POST',
@@ -140,6 +146,42 @@ export async function listOrganizationInvitations(authedFetch: AuthedFetch, orgI
 
 export async function revokeOrganizationInvitation(authedFetch: AuthedFetch, orgId: string, invitationId: string): Promise<void> {
   const resp = await authedFetch(`/api/organizations/${orgId}/invitations/${invitationId}`, { method: 'DELETE' });
+  if (!resp.ok) throw new Error(await parseErrorMessage(resp, 'Organization request failed'));
+}
+
+export interface MyInvitationItem {
+  id: string;
+  organizationId: string;
+  organizationName: string;
+  role: string;
+  token: string;
+  expirationDate: string;
+  creationDate: string;
+  object: 'organizationInvitation';
+}
+
+export async function listMyInvitations(authedFetch: AuthedFetch): Promise<MyInvitationItem[]> {
+  const resp = await authedFetch('/api/organizations/invitations/mine');
+  if (!resp.ok) throw new Error(await parseErrorMessage(resp, 'Organization request failed'));
+  const body = await resp.json();
+  return body?.data || [];
+}
+
+export async function acceptMyInvitation(authedFetch: AuthedFetch, token: string): Promise<void> {
+  const resp = await authedFetch('/api/organizations/invitations/accept', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  if (!resp.ok) throw new Error(await parseErrorMessage(resp, 'Organization request failed'));
+}
+
+export async function declineMyInvitation(authedFetch: AuthedFetch, token: string): Promise<void> {
+  const resp = await authedFetch('/api/organizations/invitations/decline', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
   if (!resp.ok) throw new Error(await parseErrorMessage(resp, 'Organization request failed'));
 }
 

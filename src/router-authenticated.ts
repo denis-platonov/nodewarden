@@ -93,7 +93,11 @@ import {
   handleGetOrganizationInvitations,
   handleRevokeOrganizationInvitation,
   handleAcceptOrganizationInvitation,
+  handleGetMyInvitations,
+  handleDeclineOrganizationInvitation,
+  handleClaimSsoPendingMember,
   handleGetCollections,
+  handleGetUserCollections,
   handleCreateCollection,
   handleUpdateCollection,
   handleDeleteCollection,
@@ -445,9 +449,16 @@ export async function handleAuthenticatedRoute(
     return errorResponse('Method not allowed', 405);
   }
 
-  const orgInvitationAcceptMatch = path.match(/^\/api\/organizations\/invitations\/([a-f0-9-]+)\/accept$/i);
-  if (orgInvitationAcceptMatch && method === 'POST') {
-    return handleAcceptOrganizationInvitation(request, env, userId, orgInvitationAcceptMatch[1]);
+  if (path === '/api/organizations/invitations/mine' && method === 'GET') {
+    return handleGetMyInvitations(request, env, userId);
+  }
+
+  if (path === '/api/organizations/invitations/accept' && method === 'POST') {
+    return handleAcceptOrganizationInvitation(request, env, userId);
+  }
+
+  if (path === '/api/organizations/invitations/decline' && method === 'POST') {
+    return handleDeclineOrganizationInvitation(request, env, userId);
   }
 
   const orgMatch = path.match(/^\/api\/organizations\/([a-f0-9-]+)(\/.*)?$/i);
@@ -465,6 +476,10 @@ export async function handleAuthenticatedRoute(
     if (subPath === '/keys') {
       if (method === 'GET') return handleGetOrganizationKeys(request, env, userId, orgId);
       return errorResponse('Method not allowed', 405);
+    }
+
+    if (subPath === '/sso/pending-member' && method === 'POST') {
+      return handleClaimSsoPendingMember(request, env, userId, orgId);
     }
 
     if (subPath === '/sso') {
@@ -566,6 +581,9 @@ export async function handleAuthenticatedRoute(
   }
 
   if (path === '/api/collections' || path.startsWith('/api/collections/')) {
+    if (path === '/api/collections' && method === 'GET') {
+      return handleGetUserCollections(request, env, userId);
+    }
     if (method === 'GET') {
       return jsonResponse({ data: [], object: 'list', continuationToken: null });
     }

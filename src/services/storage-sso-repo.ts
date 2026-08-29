@@ -5,6 +5,7 @@ export interface SsoState {
   organizationId: string;
   redirectUri: string;
   codeChallenge: string | null;
+  nonce: string | null;
   expiresAt: number;
   createdAt: number;
 }
@@ -87,14 +88,14 @@ export async function deleteSsoConfig(db: D1Database, organizationId: string): P
 
 export async function saveSsoState(db: D1Database, state: SsoState): Promise<void> {
   await db
-    .prepare('INSERT INTO sso_states(state, organization_id, redirect_uri, code_challenge, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?)')
-    .bind(state.state, state.organizationId, state.redirectUri, state.codeChallenge, state.expiresAt, state.createdAt)
+    .prepare('INSERT INTO sso_states(state, organization_id, redirect_uri, code_challenge, nonce, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)')
+    .bind(state.state, state.organizationId, state.redirectUri, state.codeChallenge, state.nonce ?? null, state.expiresAt, state.createdAt)
     .run();
 }
 
 export async function getSsoState(db: D1Database, state: string): Promise<SsoState | null> {
   const row = await db
-    .prepare('SELECT state, organization_id, redirect_uri, code_challenge, expires_at, created_at FROM sso_states WHERE state = ?')
+    .prepare('SELECT state, organization_id, redirect_uri, code_challenge, nonce, expires_at, created_at FROM sso_states WHERE state = ?')
     .bind(state)
     .first<any>();
   if (!row) return null;
@@ -103,6 +104,7 @@ export async function getSsoState(db: D1Database, state: string): Promise<SsoSta
     organizationId: row.organization_id,
     redirectUri: row.redirect_uri,
     codeChallenge: row.code_challenge ?? null,
+    nonce: row.nonce ?? null,
     expiresAt: row.expires_at,
     createdAt: row.created_at,
   };
@@ -136,8 +138,12 @@ export async function getSsoCode(db: D1Database, code: string): Promise<SsoCode 
   };
 }
 
-export async function markSsoCodeUsed(db: D1Database, code: string): Promise<void> {
-  await db.prepare('UPDATE sso_codes SET used = 1 WHERE code = ?').bind(code).run();
+// Claims the code atomically: only the caller whose UPDATE actually flipped
+// `used` may continue, so concurrent redemptions cannot both succeed.
+export async function claimSsoCode(db: D1Database, code: string): Promise<boolean> {
+  const result = await db.prepare('UPDATE sso_codes SET used = 1 WHERE code = ? AND used = 0').bind(code).run();
+  const changes = (result as any)?.meta?.changes;
+  return typeof changes === 'number' ? changes > 0 : true;
 }
 
 export async function deleteSsoCode(db: D1Database, code: string): Promise<void> {

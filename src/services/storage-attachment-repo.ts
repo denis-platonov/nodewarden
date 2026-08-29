@@ -22,27 +22,6 @@ export async function getAttachment(db: D1Database, id: string): Promise<Attachm
   };
 }
 
-export async function getAttachmentForUser(db: D1Database, id: string, userId: string): Promise<Attachment | null> {
-  const row = await db
-    .prepare(
-      `SELECT a.id, a.cipher_id, a.file_name, a.size, a.size_name, a.key
-       FROM attachments a
-       INNER JOIN ciphers c ON c.id = a.cipher_id
-       WHERE a.id = ? AND c.user_id = ?`
-    )
-    .bind(id, userId)
-    .first<any>();
-  if (!row) return null;
-  return {
-    id: row.id,
-    cipherId: row.cipher_id,
-    fileName: row.file_name,
-    size: row.size,
-    sizeName: row.size_name,
-    key: row.key,
-  };
-}
-
 export async function saveAttachment(db: D1Database, safeBind: SafeBind, attachment: Attachment): Promise<void> {
   const stmt = db.prepare(
     'INSERT INTO attachments(id, cipher_id, file_name, size, size_name, key) VALUES(?, ?, ?, ?, ?, ?) ' +
@@ -57,20 +36,6 @@ export async function saveAttachment(db: D1Database, safeBind: SafeBind, attachm
 
 export async function deleteAttachment(db: D1Database, id: string): Promise<void> {
   await db.prepare('DELETE FROM attachments WHERE id = ?').bind(id).run();
-}
-
-export async function deleteAttachmentForUser(db: D1Database, id: string, userId: string): Promise<void> {
-  await db
-    .prepare(
-      `DELETE FROM attachments
-       WHERE id = ?
-         AND EXISTS (
-           SELECT 1 FROM ciphers c
-           WHERE c.id = attachments.cipher_id AND c.user_id = ?
-         )`
-    )
-    .bind(id, userId)
-    .run();
 }
 
 export async function bulkDeleteAttachmentsByIds(

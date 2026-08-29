@@ -110,6 +110,16 @@
     // 允许的最远删除日期（距当前天数）。
     maxDeletionDays: 31,
   },
+  organizations: {
+    // Organizations a single account may own. Creating one grants premium
+    // features, so the count is bounded.
+    // 单个账户可创建的组织数量上限。创建组织会授予高级功能，因此需要限制数量。
+    maxOwnedPerUser: 5,
+    // Default and maximum SCIM page sizes.
+    // SCIM 分页的默认值与上限。
+    scimDefaultPageSize: 100,
+    scimMaxPageSize: 500,
+  },
   pagination: {
     // Default page size when client does not specify pageSize.
     // 客户端未传 pageSize 时的默认分页大小。

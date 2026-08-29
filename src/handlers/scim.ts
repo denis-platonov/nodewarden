@@ -1,16 +1,18 @@
-import type { Env, ScimConfig, ScimConfigResponse, ScimUser } from '../types';
+import type { Env, OrganizationInvitation, OrganizationMember, ScimConfig, ScimConfigResponse, ScimUser, User } from '../types';
 import { errorResponse, jsonResponse } from '../utils/response';
-import { getOrganizationMember, getOrganizationMembers, getOrganizationMemberIds } from '../services/storage-organization-repo';
+import { getOrganization, getOrganizationMember, getOrganizationMembers, getOrganizationMemberIds } from '../services/storage-organization-repo';
 import { saveOrganizationMember } from '../services/storage-organization-repo';
+import { getOrganizationInvitations, saveOrganizationInvitation } from '../services/storage-organization-repo';
 import { getCollection, getCollectionsForOrganization, saveCollection, deleteCollection } from '../services/storage-organization-repo';
 import { isOrgAdmin } from '../services/storage-organization-repo';
 import { getScimConfig, saveScimConfig, deleteScimConfig } from '../services/storage-scim-repo';
-import { getScimUser, getScimUserByEmail, getScimUserByUserId, listScimUsers, saveScimUser, deleteScimUser } from '../services/storage-scim-repo';
-import { getUser, getUserById } from '../services/storage-user-repo';
+import { getScimUser, listScimUsers, saveScimUser, deleteScimUser } from '../services/storage-scim-repo';
+import { getUser, getUserById, getUsersByIds } from '../services/storage-user-repo';
 import { generateUUID } from '../utils/uuid';
 import { safeWriteAuditEvent } from '../services/audit-events';
 import { bumpUserRevisions } from '../utils/revision';
 import { readActingDeviceIdentifier } from '../utils/device';
+import { LIMITS } from '../config/limits';
 
 const SCIM_SCHEMA_USER = 'urn:ietf:params:scim:schemas:core:2.0:User';
 const SCIM_SCHEMA_GROUP = 'urn:ietf:params:scim:schemas:core:2.0:Group';
@@ -99,6 +101,28 @@ function groupToScim(collection: { id: string; name: string; externalId: string 
   };
 }
 
+// SCIM pagination is 1-indexed and advertised in ServiceProviderConfig.
+function readScimPagination(url: URL): { startIndex: number; count: number } {
+  const requestedCount = Number(url.searchParams.get('count'));
+  const count = Number.isFinite(requestedCount) && requestedCount > 0
+    ? Math.min(requestedCount, LIMITS.organizations.scimMaxPageSize)
+    : LIMITS.organizations.scimDefaultPageSize;
+  const requestedStart = Number(url.searchParams.get('startIndex'));
+  const startIndex = Number.isFinite(requestedStart) && requestedStart >= 1 ? Math.floor(requestedStart) : 1;
+  return { startIndex, count };
+}
+
+// Entra ID sends SCIM boolean values as strings ("True"/"False"); accept both.
+function readScimBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  return fallback;
+}
+
 function readScimEmail(body: Record<string, any>): string | null {
   const emails = body.emails;
   if (Array.isArray(emails) && emails.length) {
@@ -182,6 +206,79 @@ export async function handleDeleteScimConfig(request: Request, env: Env, userId:
   return new Response(null, { status: 204 });
 }
 
+const SCIM_INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// SCIM provisioning must not silently turn an existing account into a full member
+// of someone else's organization: create a pending membership plus an invitation
+// the account holder claims themselves.
+async function provisionScimMember(env: Env, request: Request, orgId: string, account: User): Promise<void> {
+  const existingMember = await getOrganizationMember(env.DB, orgId, account.id);
+  // An accepted member needs nothing. A status-0 row (fresh stub OR a previously
+  // revoked membership being reactivated) falls through so a claimable
+  // invitation exists again — otherwise deactivate→reactivate is a one-way door.
+  if (existingMember && existingMember.status === 1) return;
+
+  const now = new Date().toISOString();
+  if (!existingMember) {
+    await saveOrganizationMember(env.DB, {
+      organizationId: orgId,
+      userId: account.id,
+      status: 0,
+      role: 'member',
+      permissions: {},
+      collections: [],
+      encryptedOrgKey: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  const email = account.email.toLowerCase();
+  const invitations = await getOrganizationInvitations(env.DB, orgId);
+  const alreadyInvited = invitations.some(
+    (invitation) => invitation.status === 0 && invitation.email.toLowerCase() === email && new Date(invitation.expiresAt).getTime() >= Date.now()
+  );
+  if (!alreadyInvited) {
+    const org = await getOrganization(env.DB, orgId);
+    const invitation: OrganizationInvitation = {
+      id: generateUUID(),
+      organizationId: orgId,
+      email,
+      role: 'member',
+      permissions: {},
+      collections: [],
+      invitedBy: org?.ownerId ?? account.id,
+      status: 0,
+      token: generateUUID() + generateUUID(),
+      expiresAt: new Date(Date.now() + SCIM_INVITATION_TTL_MS).toISOString(),
+      createdAt: now,
+      updatedAt: now,
+    };
+    await saveOrganizationInvitation(env.DB, invitation);
+  }
+
+  await bumpUserRevisions(env, [account.id], readActingDeviceIdentifier(request));
+}
+
+// Identity providers deprovision by setting active=false (PATCH/PUT), not by
+// DELETE, so the membership has to follow the flag. Re-activation deliberately
+// does not promote the member back: they re-claim the pending invitation.
+async function revokeScimMembership(env: Env, request: Request, orgId: string, userId: string | null): Promise<void> {
+  if (!userId) return;
+  const member = await getOrganizationMember(env.DB, orgId, userId);
+  if (!member || member.status === 0) return;
+  // The owner must never be locked out by the IdP: with the owner at status 0
+  // every management endpoint 404s and the org becomes unmanageable.
+  if (member.role === 'owner') {
+    await writeScimAudit(env, null, 'scim.user.revoke.blocked', { organizationId: orgId, userId, reason: 'owner' });
+    return;
+  }
+  member.status = 0;
+  member.updatedAt = new Date().toISOString();
+  await saveOrganizationMember(env.DB, member);
+  await bumpUserRevisions(env, [userId], readActingDeviceIdentifier(request));
+}
+
 // ============ SCIM v2 endpoints (token-authenticated) ============
 
 export async function authenticateScimRequest(request: Request, env: Env): Promise<{ orgId: string } | null> {
@@ -254,16 +351,16 @@ export async function handleScimListUsers(request: Request, env: Env, orgId: str
 
   let scimUsers = await listScimUsers(env.DB, orgId);
 
+  // One batched lookup instead of a query per row.
+  const accounts = await getUsersByIds(env.DB, scimUsers.map((scimUser) => scimUser.userId ?? '').filter(Boolean));
+
   const emailMatch = filter.match(/userName\s+eq\s+"([^"]+)"/i) || filter.match(/emails\s+eq\s+"([^"]+)"/i);
   if (emailMatch) {
     const email = emailMatch[1].toLowerCase();
-    const matched: ScimUser[] = [];
-    for (const scimUser of scimUsers) {
-      if (!scimUser.userId) continue;
-      const user = await getUserById(env.DB, scimUser.userId);
-      if (user && user.email.toLowerCase() === email) matched.push(scimUser);
-    }
-    scimUsers = matched;
+    scimUsers = scimUsers.filter((scimUser) => {
+      const user = scimUser.userId ? accounts.get(scimUser.userId) : null;
+      return !!user && user.email.toLowerCase() === email;
+    });
   }
 
   const externalIdMatch = filter.match(/externalId\s+eq\s+"([^"]+)"/i);
@@ -272,23 +369,20 @@ export async function handleScimListUsers(request: Request, env: Env, orgId: str
     scimUsers = scimUsers.filter((user) => user.externalId === externalId);
   }
 
-  const users: Record<string, unknown>[] = [];
-  for (const scimUser of scimUsers) {
-    let email: string | null = null;
-    let displayName: string | null = null;
-    if (scimUser.userId) {
-      const user = await getUserById(env.DB, scimUser.userId);
-      email = user?.email ?? null;
-      displayName = user?.name ?? null;
-    }
-    users.push(userToScim(scimUser, email, displayName));
-  }
+  const totalResults = scimUsers.length;
+  const { startIndex, count } = readScimPagination(url);
+  const page = scimUsers.slice(startIndex - 1, startIndex - 1 + count);
+
+  const users = page.map((scimUser) => {
+    const user = scimUser.userId ? accounts.get(scimUser.userId) : null;
+    return userToScim(scimUser, user?.email ?? null, user?.name ?? null);
+  });
 
   return scimJson({
     schemas: [SCIM_SCHEMA_LIST],
-    totalResults: users.length,
+    totalResults,
     itemsPerPage: users.length,
-    startIndex: 1,
+    startIndex,
     Resources: users,
   });
 }
@@ -305,7 +399,7 @@ export async function handleScimCreateUser(request: Request, env: Env, orgId: st
   const email = readScimEmail(body || {});
   if (!email) return scimError(400, 'A userName or email is required');
   const externalId = String(body.externalId || body.id || email).trim();
-  const active = body.active !== false;
+  const active = readScimBoolean(body.active, true);
 
   const now = new Date().toISOString();
   let scimUser = await getScimUser(env.DB, orgId, externalId);
@@ -313,20 +407,10 @@ export async function handleScimCreateUser(request: Request, env: Env, orgId: st
 
   const account = await getUser(env.DB, email);
   if (account) {
-    const existingMember = await getOrganizationMember(env.DB, orgId, account.id);
-    if (!existingMember || existingMember.status !== 1) {
-      await saveOrganizationMember(env.DB, {
-        organizationId: orgId,
-        userId: account.id,
-        status: 1,
-        role: 'member',
-        permissions: {},
-        collections: existingMember?.collections || [],
-        encryptedOrgKey: existingMember?.encryptedOrgKey ?? null,
-        createdAt: existingMember?.createdAt ?? now,
-        updatedAt: now,
-      });
-      await bumpUserRevisions(env, [account.id], readActingDeviceIdentifier(request));
+    if (active) {
+      await provisionScimMember(env, request, orgId, account);
+    } else {
+      await revokeScimMembership(env, request, orgId, account.id);
     }
     if (!scimUser || scimUser.userId !== account.id) {
       scimUser = {
@@ -390,7 +474,7 @@ export async function handleScimPutUser(request: Request, env: Env, orgId: strin
       organizationId: orgId,
       externalId: id,
       userId: null,
-      active: body.active !== false,
+      active: readScimBoolean(body.active, true),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -398,29 +482,18 @@ export async function handleScimPutUser(request: Request, env: Env, orgId: strin
 
   const email = readScimEmail(body || {});
   const now = new Date().toISOString();
-  scimUser.active = body.active !== false;
+  scimUser.active = readScimBoolean(body.active, true);
   scimUser.updatedAt = now;
 
   if (email) {
     const account = await getUser(env.DB, email);
     if (account) {
       scimUser.userId = account.id;
-      const existingMember = await getOrganizationMember(env.DB, orgId, account.id);
-      if (!existingMember || existingMember.status !== 1) {
-        await saveOrganizationMember(env.DB, {
-          organizationId: orgId,
-          userId: account.id,
-          status: 1,
-          role: 'member',
-          permissions: {},
-          collections: existingMember?.collections || [],
-          encryptedOrgKey: existingMember?.encryptedOrgKey ?? null,
-          createdAt: existingMember?.createdAt ?? now,
-          updatedAt: now,
-        });
-        await bumpUserRevisions(env, [account.id], readActingDeviceIdentifier(request));
-      }
+      if (scimUser.active) await provisionScimMember(env, request, orgId, account);
     }
+  }
+  if (!scimUser.active) {
+    await revokeScimMembership(env, request, orgId, scimUser.userId);
   }
 
   await saveScimUser(env.DB, scimUser);
@@ -447,16 +520,23 @@ export async function handleScimPatchUser(request: Request, env: Env, orgId: str
     const op = String(operation.op || '').toLowerCase();
     const path = String(operation.path || '');
     const value = operation.value;
-    if (op === 'replace' && (path === 'active' || path === 'Active')) {
-      scimUser.active = value === true;
-    }
-    if (op === 'replace' && (path === 'active' || path === 'Active') === false && path === '') {
-      if (value && typeof value === 'object') {
-        if (typeof value.active === 'boolean') scimUser.active = value.active;
-      }
+    if (op !== 'replace') continue;
+    if (path.toLowerCase() === 'active') {
+      scimUser.active = readScimBoolean(value, scimUser.active);
+    } else if (!path && value && typeof value === 'object' && value.active !== undefined) {
+      // Pathless replace carries the changed attributes as an object.
+      scimUser.active = readScimBoolean(value.active, scimUser.active);
     }
   }
   scimUser.updatedAt = new Date().toISOString();
+  if (!scimUser.active) {
+    await revokeScimMembership(env, request, orgId, scimUser.userId);
+  } else if (scimUser.userId) {
+    // Reactivation via PATCH is the default Okta/Entra flow; restore the
+    // pending-invitation path just like PUT/POST do.
+    const account = await getUserById(env.DB, scimUser.userId);
+    if (account) await provisionScimMember(env, request, orgId, account);
+  }
   await saveScimUser(env.DB, scimUser);
 
   await writeScimAudit(env, null, 'scim.user.patch', { organizationId: orgId, externalId: id, active: scimUser.active });
@@ -467,35 +547,48 @@ export async function handleScimPatchUser(request: Request, env: Env, orgId: str
 
 // DELETE /api/scim/v2/Users/:id
 export async function handleScimDeleteUser(request: Request, env: Env, orgId: string, id: string): Promise<Response> {
-  void request;
   const scimUser = await getScimUser(env.DB, orgId, id);
   if (!scimUser) return scimError(404, 'User not found');
 
-  if (scimUser.userId) {
-    const existingMember = await getOrganizationMember(env.DB, orgId, scimUser.userId);
-    if (existingMember) {
-      existingMember.status = 0;
-      existingMember.updatedAt = new Date().toISOString();
-      await saveOrganizationMember(env.DB, existingMember);
-      await bumpUserRevisions(env, [scimUser.userId], readActingDeviceIdentifier(request));
-    }
-  }
+  await revokeScimMembership(env, request, orgId, scimUser.userId);
   await deleteScimUser(env.DB, orgId, id);
   await writeScimAudit(env, null, 'scim.user.delete', { organizationId: orgId, externalId: id });
 
   return new Response(null, { status: 204 });
 }
 
-async function getGroupMemberExternalIds(db: D1Database, orgId: string, collectionId: string): Promise<string[]> {
-  const members = await getOrganizationMembers(db, orgId);
+// Members plus their SCIM mapping, loaded once. Resolving group membership per
+// collection with per-member queries costs O(collections x members) round trips
+// and blows the Worker subrequest budget on any real directory.
+interface ScimOrgSnapshot {
+  members: OrganizationMember[];
+  externalIdByUserId: Map<string, string>;
+}
+
+async function loadScimOrgSnapshot(db: D1Database, orgId: string): Promise<ScimOrgSnapshot> {
+  const [members, scimUsers] = await Promise.all([
+    getOrganizationMembers(db, orgId),
+    listScimUsers(db, orgId),
+  ]);
+  const externalIdByUserId = new Map<string, string>();
+  for (const scimUser of scimUsers) {
+    if (scimUser.userId) externalIdByUserId.set(scimUser.userId, scimUser.externalId);
+  }
+  return { members, externalIdByUserId };
+}
+
+function groupMemberExternalIds(snapshot: ScimOrgSnapshot, collectionId: string): string[] {
   const out: string[] = [];
-  for (const member of members) {
-    if ((member.collections || []).includes(collectionId)) {
-      const scimUser = member.userId ? await getScimUserByUserId(db, orgId, member.userId) : null;
-      if (scimUser) out.push(scimUser.externalId);
-    }
+  for (const member of snapshot.members) {
+    if (!(member.collections || []).includes(collectionId)) continue;
+    const externalId = member.userId ? snapshot.externalIdByUserId.get(member.userId) : undefined;
+    if (externalId) out.push(externalId);
   }
   return out;
+}
+
+async function getGroupMemberExternalIds(db: D1Database, orgId: string, collectionId: string): Promise<string[]> {
+  return groupMemberExternalIds(await loadScimOrgSnapshot(db, orgId), collectionId);
 }
 
 async function applyGroupMembers(db: D1Database, env: Env, orgId: string, collectionId: string, memberExternalIds: string[]): Promise<void> {
@@ -525,18 +618,21 @@ async function applyGroupMembers(db: D1Database, env: Env, orgId: string, collec
 
 // GET /api/scim/v2/Groups
 export async function handleScimListGroups(request: Request, env: Env, orgId: string): Promise<Response> {
-  void request;
+  const url = new URL(request.url);
   const collections = (await getCollectionsForOrganization(env.DB, orgId)).filter((collection) => collection.externalId);
-  const groups: Record<string, unknown>[] = [];
-  for (const collection of collections) {
-    const memberExternalIds = await getGroupMemberExternalIds(env.DB, orgId, collection.id);
-    groups.push(groupToScim(collection, memberExternalIds));
-  }
+
+  const totalResults = collections.length;
+  const { startIndex, count } = readScimPagination(url);
+  const page = collections.slice(startIndex - 1, startIndex - 1 + count);
+
+  const snapshot = await loadScimOrgSnapshot(env.DB, orgId);
+  const groups = page.map((collection) => groupToScim(collection, groupMemberExternalIds(snapshot, collection.id)));
+
   return scimJson({
     schemas: [SCIM_SCHEMA_LIST],
-    totalResults: groups.length,
+    totalResults,
     itemsPerPage: groups.length,
-    startIndex: 1,
+    startIndex,
     Resources: groups,
   });
 }
@@ -665,10 +761,15 @@ export async function handleScimPatchGroup(request: Request, env: Env, orgId: st
 
 // DELETE /api/scim/v2/Groups/:id
 export async function handleScimDeleteGroup(request: Request, env: Env, orgId: string, id: string): Promise<Response> {
-  void request;
   const collection = (await getCollectionsForOrganization(env.DB, orgId)).find((c) => c.externalId === id || c.id === id);
   if (!collection) return scimError(404, 'Group not found');
+
+  // Everyone in the org loses a collection from their sync view, not only the
+  // members whose access list referenced it.
+  const memberIds = await getOrganizationMemberIds(env.DB, orgId);
   await deleteCollection(env.DB, collection.id);
+  await bumpUserRevisions(env, memberIds, readActingDeviceIdentifier(request));
+
   await writeScimAudit(env, null, 'scim.group.delete', { organizationId: orgId, groupName: collection.name });
   return new Response(null, { status: 204 });
 }

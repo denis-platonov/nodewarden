@@ -9,7 +9,7 @@
 // - If the new table stores persistent data, update the backup export/import
 //   contract in src/services/backup-archive.ts and backup-import.ts.
 // - Keep statements idempotent; D1 may execute them again on later requests.
-const SCHEMA_STATEMENTS: readonly string[] = [
+export const SCHEMA_STATEMENTS: readonly string[] = [
   'CREATE TABLE IF NOT EXISTS users (' +
   'id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT, master_password_hint TEXT, master_password_hash TEXT NOT NULL, ' +
   'key TEXT NOT NULL, private_key TEXT, public_key TEXT, kdf_type INTEGER NOT NULL, ' +
@@ -202,6 +202,16 @@ const SCHEMA_STATEMENTS: readonly string[] = [
   'FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE, ' +
   'FOREIGN KEY (cipher_id) REFERENCES ciphers(id) ON DELETE CASCADE)',
 
+  // Repair: folder_id and favorite are personal state on a row that organization
+  // members share, so an org cipher must carry neither. Older rows may have been
+  // written before the server enforced this.
+  "UPDATE ciphers SET folder_id = NULL, favorite = 0, archived_at = NULL, " +
+  "data = CASE WHEN json_valid(data) THEN json_set(data, '$.folderId', NULL, '$.archivedAt', NULL) ELSE data END " +
+  "WHERE (folder_id IS NOT NULL OR favorite = 1 OR archived_at IS NOT NULL " +
+  "OR (json_valid(data) AND json_extract(data, '$.folderId') IS NOT NULL)) AND (" +
+  "(json_valid(data) AND json_extract(data, '$.organizationId') IS NOT NULL) " +
+  'OR id IN (SELECT cipher_id FROM collection_items))',
+
   'CREATE TABLE IF NOT EXISTS organization_invitations (' +
   'id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL DEFAULT \'member\', ' +
   'permissions TEXT NOT NULL DEFAULT \'{}\', collections TEXT, invited_by TEXT NOT NULL, ' +
@@ -226,9 +236,10 @@ const SCHEMA_STATEMENTS: readonly string[] = [
   'FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)',
 
   'CREATE TABLE IF NOT EXISTS sso_states (' +
-  'state TEXT PRIMARY KEY, organization_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, code_challenge TEXT, ' +
+  'state TEXT PRIMARY KEY, organization_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, code_challenge TEXT, nonce TEXT, ' +
   'expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, ' +
   'FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE)',
+  'ALTER TABLE sso_states ADD COLUMN nonce TEXT',
   'CREATE INDEX IF NOT EXISTS idx_sso_states_org ON sso_states(organization_id)',
 
   'CREATE TABLE IF NOT EXISTS sso_codes (' +

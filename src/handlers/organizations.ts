@@ -15,18 +15,21 @@ import {
   isOrgManager,
   isOrgAdmin,
   isOrgOwner,
+  canAssignOrgRole,
+  orgRoleRank,
   getCollection,
   getCollectionsForOrganization,
+  getAccessibleCollectionsForUser,
   saveCollection,
   deleteCollection,
   addCollectionItem,
   removeCollectionItem,
   getCollectionItems,
   getCipherCollections,
-  removeCipherFromAllCollections,
   getOrganizationInvitation,
   getOrganizationInvitationByToken,
   getOrganizationInvitations,
+  getOrganizationInvitationsForEmail,
   saveOrganizationInvitation,
   deleteOrganizationInvitation,
   getPolicy,
@@ -35,12 +38,14 @@ import {
   deletePolicy,
 } from '../services/storage-organization-repo';
 import { getCipher } from '../services/storage-cipher-repo';
+import { readOrgCipherFields } from '../services/storage-org-access';
 import { getUserById, getUser } from '../services/storage-user-repo';
 import { generateUUID } from '../utils/uuid';
 import { safeWriteAuditEvent } from '../services/audit-events';
 import { readActingDeviceIdentifier } from '../utils/device';
 import { bumpUserRevisions } from '../utils/revision';
 import { getSsoConfig } from '../services/storage-sso-repo';
+import { LIMITS } from '../config/limits';
 
 const ORG_ROLES = ['owner', 'admin', 'manager', 'member', 'custom'] as const;
 
@@ -175,6 +180,11 @@ export async function handleCreateOrganization(request: Request, env: Env, userI
   if (!name) return errorResponse('Organization name is required', 400);
   if (name.length > 100) return errorResponse('Organization name too long', 400);
 
+  const ownedCount = (await getOrganizationsForUser(env.DB, userId)).filter((org) => org.ownerId === userId).length;
+  if (ownedCount >= LIMITS.organizations.maxOwnedPerUser) {
+    return errorResponse(`You cannot own more than ${LIMITS.organizations.maxOwnedPerUser} organizations`, 400);
+  }
+
   const identifier = body?.identifier != null ? String(body.identifier).trim() : null;
   if (identifier) {
     const existingByIdentifier = await getOrganizationByIdentifier(env.DB, identifier);
@@ -226,7 +236,7 @@ export async function handleGetOrganization(request: Request, env: Env, userId: 
   const org = await getOrganization(env.DB, orgId);
   if (!org) return errorResponse('Not found', 404);
 
-  return jsonResponse(toOrgResponse(org, { includeKeys: true }));
+  return jsonResponse(toOrgResponse(org, { includeKeys: isOrgAdmin(member) }));
 }
 
 // PUT /api/organizations/:id
@@ -309,7 +319,9 @@ export async function handleGetOrganizationKeys(request: Request, env: Env, user
   return jsonResponse({
     key: member.encryptedOrgKey ?? null,
     publicKey: org.publicKey,
-    privateKey: org.privateKey,
+    // The org private key is only needed by administrators; members decrypt with
+    // the symmetric org key delivered in `key`.
+    privateKey: isOrgAdmin(member) ? org.privateKey : null,
     object: 'organizationKeys',
   });
 }
@@ -381,11 +393,28 @@ export async function handleInviteOrganizationMember(request: Request, env: Env,
   const collections = Array.isArray(body?.collections) ? body.collections.map(String).filter(Boolean) : [];
   const permissions = body?.permissions && typeof body.permissions === 'object' ? body.permissions : {};
 
-  const existingMember = await getOrganizationMember(env.DB, orgId, email);
-  if (existingMember) return errorResponse('User is already a member', 400);
+  if (!canAssignOrgRole(member, role)) {
+    return errorResponse('You cannot grant a role above your own', 403);
+  }
 
   const now = new Date().toISOString();
   const targetUser = await getUser(env.DB, email);
+
+  // Membership is keyed by user id, so the duplicate check has to resolve the
+  // account first. Only an ACCEPTED membership blocks re-inviting: a status-0
+  // row (SCIM-staged or revoked) must stay re-invitable or the user is stuck.
+  if (targetUser) {
+    const existingMember = await getOrganizationMember(env.DB, orgId, targetUser.id);
+    if (existingMember && existingMember.status === 1) {
+      return errorResponse('User is already a member', 400);
+    }
+  }
+  const pendingInvitations = await getOrganizationInvitations(env.DB, orgId);
+  const alreadyInvited = pendingInvitations.some(
+    (invitation) => invitation.status === 0 && invitation.email.toLowerCase() === email && new Date(invitation.expiresAt).getTime() >= Date.now()
+  );
+  if (alreadyInvited) return errorResponse('User has already been invited', 400);
+
   if (targetUser) {
     // Direct membership for existing users.
     const newMember: OrganizationMember = {
@@ -451,6 +480,12 @@ export async function handleUpdateOrganizationMember(request: Request, env: Env,
   const targetMember = await getOrganizationMember(env.DB, orgId, memberUserId);
   if (!targetMember) return errorResponse('Not found', 404);
 
+  // An actor may only modify members at or below their own rank: a manager must
+  // not demote an admin or rewrite their collections/permissions/org key.
+  if (orgRoleRank(targetMember.role) > orgRoleRank(member.role)) {
+    return errorResponse('You cannot manage a member with a higher role than your own', 403);
+  }
+
   // Only the owner may change another owner's role, and only the owner may demote the owner.
   if (targetMember.role === 'owner' && member.role !== 'owner') return errorResponse('Only the organization owner can manage owners', 403);
   if (targetMember.role === 'owner' && body.role !== undefined && body.role !== 'owner' && member.userId !== memberUserId) {
@@ -459,7 +494,15 @@ export async function handleUpdateOrganizationMember(request: Request, env: Env,
 
   const now = new Date().toISOString();
   if (body.role !== undefined) {
-    targetMember.role = normalizeRole(body.role);
+    const nextRole = normalizeRole(body.role);
+    // No self-promotion, and no granting a role above your own.
+    if (member.userId === memberUserId && nextRole !== targetMember.role) {
+      return errorResponse('You cannot change your own role', 403);
+    }
+    if (!canAssignOrgRole(member, nextRole)) {
+      return errorResponse('You cannot grant a role above your own', 403);
+    }
+    targetMember.role = nextRole;
   }
   if (body.collections !== undefined) {
     targetMember.collections = Array.isArray(body.collections) ? body.collections.map(String).filter(Boolean) : [];
@@ -495,9 +538,13 @@ export async function handleRemoveOrganizationMember(request: Request, env: Env,
 
   if (targetMember.role === 'owner') return errorResponse('The organization owner cannot be removed', 403);
   if (member.userId === memberUserId) return errorResponse('You cannot remove yourself', 403);
+  // Removal is also rank-gated: a manager must not delete an admin.
+  if (orgRoleRank(targetMember.role) > orgRoleRank(member.role)) {
+    return errorResponse('You cannot remove a member with a higher role than your own', 403);
+  }
 
+  // Org ciphers stay with the organization; only the membership row is dropped.
   await deleteOrganizationMember(env.DB, orgId, memberUserId);
-  await removeCipherFromAllCollections(env.DB, memberUserId);
   await bumpMembersRevision(env, [memberUserId], readActingDeviceIdentifier(request));
   await writeOrgAudit(env, userId, 'organization.member.remove', 'organization', orgId, {
     memberId: memberUserId,
@@ -543,6 +590,19 @@ export async function handleGetCollections(request: Request, env: Env, userId: s
   if (!member) return errorResponse('Not found', 404);
 
   const collections = await getCollectionsForOrganization(env.DB, orgId);
+  return jsonResponse({
+    data: collections.map(toCollectionResponse),
+    object: 'list',
+    continuationToken: null,
+  });
+}
+
+// GET /api/collections
+// Every collection the caller can reach, across all their organizations. Clients
+// call this directly as well as reading the collection list out of /api/sync.
+export async function handleGetUserCollections(request: Request, env: Env, userId: string): Promise<Response> {
+  void request;
+  const collections = await getAccessibleCollectionsForUser(env.DB, userId);
   return jsonResponse({
     data: collections.map(toCollectionResponse),
     object: 'list',
@@ -635,8 +695,8 @@ export async function handleDeleteCollection(request: Request, env: Env, userId:
   const collection = await getCollection(env.DB, collectionId);
   if (!collection || collection.organizationId !== orgId) return errorResponse('Not found', 404);
 
-  await deleteCollection(env.DB, collectionId);
   const memberIds = await getOrganizationMemberIds(env.DB, orgId);
+  await deleteCollection(env.DB, collectionId);
   await bumpMembersRevision(env, memberIds, readActingDeviceIdentifier(request));
   await writeOrgAudit(env, userId, 'collection.delete', 'collection', collectionId, {
     name: collection.name,
@@ -688,7 +748,16 @@ export async function handleAddCollectionItem(request: Request, env: Env, userId
   const cipher = await getCipher(env.DB, cipherId);
   if (!cipher) return errorResponse('Cipher not found', 404);
 
+  // Only this organization's own ciphers may be filed into its collections:
+  // collection membership is what grants read access in /api/sync.
+  if (readOrgCipherFields(cipher).organizationId !== orgId) {
+    return errorResponse('Cipher does not belong to this organization', 400);
+  }
+
   await addCollectionItem(env.DB, collectionId, cipherId);
+  // Members' /api/sync responses are cached per revision date, so filing an item
+  // into a collection is invisible until their revision moves.
+  await bumpMembersRevision(env, await getOrganizationMemberIds(env.DB, orgId), readActingDeviceIdentifier(request));
   await writeOrgAudit(env, userId, 'collection.addItem', 'collection', collectionId, {
     cipherId,
     organizationId: orgId,
@@ -707,6 +776,7 @@ export async function handleRemoveCollectionItem(request: Request, env: Env, use
   if (!collection || collection.organizationId !== orgId) return errorResponse('Not found', 404);
 
   await removeCollectionItem(env.DB, collectionId, cipherId);
+  await bumpMembersRevision(env, await getOrganizationMemberIds(env.DB, orgId), readActingDeviceIdentifier(request));
   await writeOrgAudit(env, userId, 'collection.removeItem', 'collection', collectionId, {
     cipherId,
     organizationId: orgId,
@@ -779,8 +849,19 @@ export async function handleDeletePolicy(request: Request, env: Env, userId: str
   return new Response(null, { status: 204 });
 }
 
-// POST /api/organizations/invitations/:token/accept
-export async function handleAcceptOrganizationInvitation(request: Request, env: Env, userId: string, token: string): Promise<Response> {
+// POST /api/organizations/invitations/accept
+// The token travels in the body, not the path: request URLs land in access logs.
+export async function handleAcceptOrganizationInvitation(request: Request, env: Env, userId: string): Promise<Response> {
+  let body: any;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+
+  const token = String(body?.token || '').trim();
+  if (!token) return errorResponse('Invitation token is required', 400);
+
   const invitation = await getOrganizationInvitationByToken(env.DB, token);
   if (!invitation) return errorResponse('Invitation not found', 404);
   if (invitation.status !== 0) return errorResponse('Invitation is no longer pending', 400);
@@ -830,6 +911,72 @@ export async function handleAcceptOrganizationInvitation(request: Request, env: 
     role: invitation.role,
     ssoEnabled: !!ssoEnabled?.enabled,
   });
+}
+
+// GET /api/organizations/invitations/mine
+// Invitations waiting for the caller. Without this an invited user has no way to
+// discover, let alone accept, an invitation addressed to them.
+export async function handleGetMyInvitations(request: Request, env: Env, userId: string): Promise<Response> {
+  void request;
+  const user = await getUserById(env.DB, userId);
+  if (!user) return errorResponse('Not found', 404);
+
+  const now = Date.now();
+  const invitations = (await getOrganizationInvitationsForEmail(env.DB, user.email))
+    .filter((invitation) => invitation.status === 0 && new Date(invitation.expiresAt).getTime() >= now);
+
+  const data: Record<string, unknown>[] = [];
+  for (const invitation of invitations) {
+    const org = await getOrganization(env.DB, invitation.organizationId);
+    if (!org || !org.enabled) continue;
+    data.push({
+      id: invitation.id,
+      organizationId: invitation.organizationId,
+      organizationName: org.name,
+      role: invitation.role,
+      // The token belongs to this invitee; they need it to accept.
+      token: invitation.token,
+      expirationDate: invitation.expiresAt,
+      creationDate: invitation.createdAt,
+      object: 'organizationInvitation',
+    });
+  }
+
+  return jsonResponse({ data, object: 'list', continuationToken: null });
+}
+
+// POST /api/organizations/invitations/decline
+export async function handleDeclineOrganizationInvitation(request: Request, env: Env, userId: string): Promise<Response> {
+  let body: any;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+
+  const token = String(body?.token || '').trim();
+  if (!token) return errorResponse('Invitation token is required', 400);
+
+  const invitation = await getOrganizationInvitationByToken(env.DB, token);
+  if (!invitation) return errorResponse('Invitation not found', 404);
+
+  const user = await getUserById(env.DB, userId);
+  if (!user) return errorResponse('Not found', 404);
+  if (user.email.toLowerCase() !== invitation.email.toLowerCase()) {
+    return errorResponse('Invitation was issued to a different account', 403);
+  }
+
+  // Drop the pending membership SCIM may have staged alongside the invitation.
+  const existingMember = await getOrganizationMember(env.DB, invitation.organizationId, userId);
+  if (existingMember && existingMember.status !== 1) {
+    await deleteOrganizationMember(env.DB, invitation.organizationId, userId);
+  }
+  await deleteOrganizationInvitation(env.DB, invitation.id);
+  await writeOrgAudit(env, userId, 'organization.declineInvitation', 'organization', invitation.organizationId, {
+    organizationId: invitation.organizationId,
+  });
+
+  return new Response(null, { status: 204 });
 }
 
 // POST /api/organizations/:id/sso/pending-member

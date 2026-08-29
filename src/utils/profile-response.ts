@@ -38,9 +38,13 @@ export async function buildProfileResponse(user: User, env: Env): Promise<Profil
         .map((org) => {
           const base = toProfileOrganization(org);
           const membership = memberByOrg.get(org.id);
+          const role = membership?.role ?? 'member';
           return {
             ...base,
-            role: membership?.role ?? 'member',
+            // Members decrypt with the symmetric org key below; only admins get
+            // the org private key.
+            privateKey: role === 'owner' || role === 'admin' ? base.privateKey : null,
+            role,
             permissions: membership?.permissions ?? {},
             encryptedOrgKey: membership?.encryptedOrgKey ?? null,
             users: [],

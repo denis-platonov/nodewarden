@@ -56,6 +56,28 @@ export async function getUserById(db: D1Database, id: string): Promise<User | nu
   return mapUserRow(row);
 }
 
+// Batch lookup so callers rendering a list of users do not issue one query per row.
+export async function getUsersByIds(db: D1Database, ids: string[]): Promise<Map<string, User>> {
+  const unique = Array.from(new Set(ids.filter(Boolean)));
+  const out = new Map<string, User>();
+  if (!unique.length) return out;
+
+  const chunkSize = 95;
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    const placeholders = chunk.map(() => '?').join(',');
+    const res = await db
+      .prepare(`SELECT ${USER_SELECT_COLUMNS} FROM users WHERE id IN (${placeholders})`)
+      .bind(...chunk)
+      .all<any>();
+    for (const row of res.results || []) {
+      const user = mapUserRow(row);
+      out.set(user.id, user);
+    }
+  }
+  return out;
+}
+
 export async function getUserCount(db: D1Database): Promise<number> {
   const row = await db.prepare('SELECT COUNT(*) AS count FROM users').first<{ count: number }>();
   return Number(row?.count || 0);

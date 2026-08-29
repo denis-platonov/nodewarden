@@ -936,8 +936,15 @@ export async function handleGetCipher(request: Request, env: Env, userId: string
     return errorResponse('Cipher not found', 404);
   }
 
-  const attachments = await storage.getAttachmentsByCipher(cipher.id);
-  const responseOptions = cipherResponseOptionsForRequest(request);
+  const [attachments, folders] = await Promise.all([
+    storage.getAttachmentsByCipher(cipher.id),
+    storage.getAllFolders(userId),
+  ]);
+  // A shared org row may carry another member's folder id; never echo it back.
+  const responseOptions = {
+    ...cipherResponseOptionsForRequest(request),
+    validFolderIds: new Set(folders.map((folder) => folder.id)),
+  };
   return jsonResponse(
     cipherToResponse(cipher, attachments, responseOptions)
   );
@@ -1205,7 +1212,8 @@ export async function handleDeleteCipherCompat(request: Request, env: Env, userI
 
   if (cipher.deletedAt) {
     await deleteAllAttachmentsForCipher(env, id);
-    await storage.deleteCipher(id, userId);
+    // Access resolved above; owner-scoped delete would no-op for a non-author member.
+    await storage.deleteCipherById(id);
     const revisionDate = await storage.updateRevisionDate(userId);
     notifyVaultSyncForRequest(request, env, userId, revisionDate);
     notifyCipherDeleteForRequest(request, env, cipher, revisionDate);
@@ -1234,7 +1242,9 @@ export async function handlePermanentDeleteCipher(request: Request, env: Env, us
   // Delete all attachments first
   await deleteAllAttachmentsForCipher(env, id);
 
-  await storage.deleteCipher(id, userId);
+  // Access was resolved above; org ciphers carry the author's user_id, so the
+  // owner-scoped delete would silently no-op for a non-author member.
+  await storage.deleteCipherById(id);
   const revisionDate = await storage.updateRevisionDate(userId);
   notifyVaultSyncForRequest(request, env, userId, revisionDate);
   notifyCipherDeleteForRequest(request, env, cipher, revisionDate);
@@ -1287,6 +1297,16 @@ export async function handlePartialUpdateCipher(request: Request, env: Env, user
     return errorResponse('Invalid JSON', 400);
   }
 
+  // Organization ciphers are shared rows, so they hold no personal folder or
+  // favorite state; see reconcileOrgCipherMembership. Official clients still
+  // call this endpoint for org items, so accept the request and ignore the
+  // fields — exactly what the full-update path does — instead of erroring.
+  const isOrganizationCipher = !!readOrgCipherFields(cipher).organizationId;
+  if (isOrganizationCipher) {
+    return jsonResponse(
+      cipherToResponse(cipher, [], cipherResponseOptionsForRequest(request))
+    );
+  }
   if (body.folderId !== undefined) {
     const folderId = normalizeOptionalId(body.folderId);
     if (folderId) {
@@ -1375,6 +1395,11 @@ export async function handleArchiveCipher(request: Request, env: Env, userId: st
   if (cipher.deletedAt) {
     return errorResponse('Cannot archive a deleted cipher', 400);
   }
+  // archived_at lives on the shared row; archiving an org item would hide it for
+  // every member. Upstream also restricts archive to personal items.
+  if (isOrgCipher(cipher)) {
+    return errorResponse('Organization items cannot be archived', 400);
+  }
 
   cipher.archivedAt = new Date().toISOString();
   cipher.updatedAt = cipher.archivedAt;
@@ -1462,6 +1487,48 @@ export async function handleBulkUnarchiveCiphers(request: Request, env: Env, use
   return buildCipherListResponse(request, storage, userId, ids);
 }
 
+// Bulk SQL only touches personal ciphers; org ciphers in a bulk request are
+// resolved per-cipher through the membership/collection access check and applied
+// individually, then each affected organization's members are notified.
+async function applyBulkOrgCipherOp(
+  request: Request,
+  env: Env,
+  storage: StorageService,
+  userId: string,
+  ids: string[],
+  op: 'softDelete' | 'restore' | 'permanentDelete'
+): Promise<number> {
+  const orgIds = new Set<string>();
+  let applied = 0;
+  for (const id of ids) {
+    const access = await resolveCipherAccess(env.DB, userId, id);
+    if (!access || !access.organizationId) continue;
+    const cipher = access.cipher;
+    if (op === 'permanentDelete') {
+      await deleteAllAttachmentsForCipher(env, cipher.id);
+      await storage.deleteCipherById(cipher.id);
+    } else if (op === 'softDelete') {
+      if (cipher.deletedAt) continue;
+      cipher.deletedAt = new Date().toISOString();
+      cipher.updatedAt = cipher.deletedAt;
+      normalizeCipherForStorage(cipher);
+      await storage.saveCipher(cipher);
+    } else {
+      if (!cipher.deletedAt) continue;
+      cipher.deletedAt = null;
+      cipher.updatedAt = new Date().toISOString();
+      normalizeCipherForStorage(cipher);
+      await storage.saveCipher(cipher);
+    }
+    orgIds.add(access.organizationId);
+    applied += 1;
+  }
+  for (const orgId of orgIds) {
+    await notifyOrgCipherMembers(env, orgId, readActingDeviceIdentifier(request));
+  }
+  return applied;
+}
+
 // POST /api/ciphers/delete - Bulk soft delete
 export async function handleBulkDeleteCiphers(request: Request, env: Env, userId: string): Promise<Response> {
   const storage = new StorageService(env.DB);
@@ -1478,9 +1545,11 @@ export async function handleBulkDeleteCiphers(request: Request, env: Env, userId
   }
 
   const revisionDate = await storage.bulkSoftDeleteCiphers(body.ids, userId);
-  if (revisionDate) {
-    notifyVaultSyncForRequest(request, env, userId, revisionDate);
-    notifyUserCiphersSync(env, userId, revisionDate, readActingDeviceIdentifier(request));
+  const orgApplied = await applyBulkOrgCipherOp(request, env, storage, userId, body.ids.map(String), 'softDelete');
+  if (revisionDate || orgApplied) {
+    const effectiveRevision = revisionDate ?? await storage.updateRevisionDate(userId);
+    notifyVaultSyncForRequest(request, env, userId, effectiveRevision);
+    notifyUserCiphersSync(env, userId, effectiveRevision, readActingDeviceIdentifier(request));
     await writeCipherAudit(storage, request, userId, 'cipher.delete.soft.bulk', {
       count: body.ids.length,
     });
@@ -1505,9 +1574,11 @@ export async function handleBulkRestoreCiphers(request: Request, env: Env, userI
   }
 
   const revisionDate = await storage.bulkRestoreCiphers(body.ids, userId);
-  if (revisionDate) {
-    notifyVaultSyncForRequest(request, env, userId, revisionDate);
-    notifyUserCiphersSync(env, userId, revisionDate, readActingDeviceIdentifier(request));
+  const orgApplied = await applyBulkOrgCipherOp(request, env, storage, userId, body.ids.map(String), 'restore');
+  if (revisionDate || orgApplied) {
+    const effectiveRevision = revisionDate ?? await storage.updateRevisionDate(userId);
+    notifyVaultSyncForRequest(request, env, userId, effectiveRevision);
+    notifyUserCiphersSync(env, userId, effectiveRevision, readActingDeviceIdentifier(request));
   }
 
   return new Response(null, { status: 204 });
@@ -1533,23 +1604,29 @@ export async function handleBulkPermanentDeleteCiphers(request: Request, env: En
     return new Response(null, { status: 204 });
   }
 
+  // Only purge attachments for ciphers the guarded bulk SQL will actually
+  // delete: personal ones. Org ciphers go through the access-checked path below,
+  // which handles their attachments itself.
   const ownedCiphers = await storage.getCiphersByIds(ids, userId);
-  const ownedIds = ownedCiphers.map((cipher) => cipher.id);
-  if (!ownedIds.length) {
+  const personalIds = ownedCiphers.filter((cipher) => !isOrgCipher(cipher)).map((cipher) => cipher.id);
+
+  let revisionDate: string | null = null;
+  if (personalIds.length) {
+    await deleteAllAttachmentsForCiphers(env, personalIds);
+    revisionDate = await storage.bulkDeleteCiphers(personalIds, userId);
+  }
+  const orgApplied = await applyBulkOrgCipherOp(request, env, storage, userId, ids, 'permanentDelete');
+  if (!personalIds.length && !orgApplied) {
     return new Response(null, { status: 204 });
   }
 
-  await deleteAllAttachmentsForCiphers(env, ownedIds);
-
-  const revisionDate = await storage.bulkDeleteCiphers(ownedIds, userId);
-  if (revisionDate) {
-    notifyVaultSyncForRequest(request, env, userId, revisionDate);
-    notifyUserCiphersSync(env, userId, revisionDate, readActingDeviceIdentifier(request));
-    await writeCipherAudit(storage, request, userId, 'cipher.delete.permanent.bulk', {
-      count: ownedIds.length,
-      requestedCount: ids.length,
-    });
-  }
+  const effectiveRevision = revisionDate ?? await storage.updateRevisionDate(userId);
+  notifyVaultSyncForRequest(request, env, userId, effectiveRevision);
+  notifyUserCiphersSync(env, userId, effectiveRevision, readActingDeviceIdentifier(request));
+  await writeCipherAudit(storage, request, userId, 'cipher.delete.permanent.bulk', {
+    count: personalIds.length + orgApplied,
+    requestedCount: ids.length,
+  });
 
   return new Response(null, { status: 204 });
 }
