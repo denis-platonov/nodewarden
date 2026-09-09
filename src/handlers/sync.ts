@@ -108,7 +108,21 @@ export async function handleSync(request: Request, env: Env, userId: string): Pr
     mergedCiphers.set(cipher.id, cipher);
   }
 
-  const mergedAttachments = await storage.getAttachmentsByCipherIds(Array.from(mergedCiphers.keys()));
+  // ONE query for the user's own attachments, and by-cipher lookups only for
+  // the org ciphers reached through collections.
+  //
+  // This asked for every merged cipher id, a hundred at a time. Each
+  // placeholder is an index seek and D1 bills a seek as a row read whether it
+  // finds anything or not, so a 1,668-item vault with no attachments at all
+  // paid ~1,700 row reads per sync - 180,000 a day, measured, and more than
+  // reading the whole ciphers table cost. The user's own attachments are one
+  // seek; only the org ids still need the batches, and most accounts have
+  // none. See `getAttachmentsForUserAndCiphers`, which explains why the org
+  // half cannot be folded in.
+  const mergedAttachments = await storage.getAttachmentsForUserAndCiphers(
+    userId,
+    orgCiphers.map((cipher) => cipher.id)
+  );
   const mergedCipherList = Array.from(mergedCiphers.values());
 
   const cipherResponses: CipherResponse[] = [];

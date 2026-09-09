@@ -71,6 +71,7 @@ import {
   getAttachmentsByCipher as listStoredAttachmentsByCipher,
   getAttachmentsByCipherIds as listStoredAttachmentsByCipherIds,
   getAttachmentsByUserId as listStoredAttachmentsByUserId,
+  getAttachmentsForUserAndCiphers as listStoredAttachmentsForUserAndCiphers,
   saveAttachment as saveStoredAttachment,
   updateCipherRevisionDate as updateStoredCipherRevisionDate,
 } from './storage-attachment-repo';
@@ -166,6 +167,19 @@ const STORAGE_SCHEMA_VERSION_KEY = 'schema.version';
 const STORAGE_SCHEMA_VERSION = '2026-09-08-attachment-user-id';
 const REQUIRED_SCHEMA_TABLES = ['webauthn_credentials', 'webauthn_challenges', 'auth_requests', 'totp_login_replays'] as const;
 
+// Set to STORAGE_SCHEMA_VERSION once the four tables above have actually been
+// SEEN at that version, which is not the same claim the version key makes.
+//
+// hasRequiredSchemaTables() scans sqlite_master - `name IN (...)` has no index
+// to use, so it reads every object in the schema, 72 of them, and it ran on
+// every cold start: 38,609 rows a day, measured, to answer a question whose
+// answer had not changed since the schema was applied. This key lets the scan
+// be skipped, and it is written only AFTER a successful check, so the case the
+// check exists for still repairs itself: a partial apply writes the version,
+// fails to create a table, and leaves this key unset - so the next start scans,
+// finds the gap and reruns ensureStorageSchema().
+const STORAGE_SCHEMA_TABLES_KEY = 'schema.tables.verified';
+
 // D1-backed storage.
 // Contract:
 // - All methods are scoped by userId where applicable.
@@ -255,13 +269,27 @@ export class StorageService {
     if (StorageService.schemaVerified) return;
 
     await this.db.prepare('CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)').run();
-    const schemaVersion = await getStoredConfigValue(this.db, STORAGE_SCHEMA_VERSION_KEY);
+    const [schemaVersion, tablesVerified] = await Promise.all([
+      getStoredConfigValue(this.db, STORAGE_SCHEMA_VERSION_KEY),
+      getStoredConfigValue(this.db, STORAGE_SCHEMA_TABLES_KEY),
+    ]);
+    // Two primary-key lookups, one row each, in place of a 72-row scan of
+    // sqlite_master - see STORAGE_SCHEMA_TABLES_KEY. The scan still happens
+    // whenever the tables have not been confirmed at this version, which is
+    // every install's first start after an upgrade and every start after a
+    // partial apply.
     const schemaMissingRequiredTables = schemaVersion === STORAGE_SCHEMA_VERSION
-      ? !(await this.hasRequiredSchemaTables())
+      ? tablesVerified !== STORAGE_SCHEMA_VERSION && !(await this.hasRequiredSchemaTables())
       : true;
     if (schemaVersion !== STORAGE_SCHEMA_VERSION || schemaMissingRequiredTables) {
       await ensureStorageSchema(this.db);
       await saveConfigValue(this.db, STORAGE_SCHEMA_VERSION_KEY, STORAGE_SCHEMA_VERSION);
+    }
+    // Written after the tables are known good, whether they were found by the
+    // scan above or just created by ensureStorageSchema(). Skipped when it is
+    // already right, so a warm database pays no write for this.
+    if (tablesVerified !== STORAGE_SCHEMA_VERSION) {
+      await saveConfigValue(this.db, STORAGE_SCHEMA_TABLES_KEY, STORAGE_SCHEMA_VERSION);
     }
     await ensurePushInstallationCredentials(this.db);
 
@@ -605,6 +633,18 @@ export class StorageService {
 
   async getAttachmentsByUserId(userId: string): Promise<Map<string, Attachment[]>> {
     return listStoredAttachmentsByUserId(this.db, userId);
+  }
+
+  async getAttachmentsForUserAndCiphers(
+    userId: string,
+    orgCipherIds: string[]
+  ): Promise<Map<string, Attachment[]>> {
+    return listStoredAttachmentsForUserAndCiphers(
+      this.db,
+      this.sqlChunkSize.bind(this),
+      userId,
+      orgCipherIds
+    );
   }
 
   async addAttachmentToCipher(cipherId: string, attachmentId: string): Promise<void> {

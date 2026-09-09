@@ -907,9 +907,10 @@ export async function handleGetCiphers(request: Request, env: Env, userId: strin
       : ciphers.filter(c => !c.deletedAt);
   }
 
-  const attachmentsByCipher = await storage.getAttachmentsByCipherIds(
-    filteredCiphers.map((cipher) => cipher.id)
-  );
+  // Every cipher on this page came from a `user_id`-scoped query, so the
+  // by-user lookup covers all of them in one seek -- see
+  // `getAttachmentsForUserAndCiphers` for why that is worth doing.
+  const attachmentsByCipher = await storage.getAttachmentsForUserAndCiphers(userId, []);
   const validFolderIds = new Set((await storage.getAllFolders(userId)).map((folder) => folder.id));
 
   // Build responses only for the current page to keep pagination cheap.
@@ -1368,7 +1369,10 @@ async function buildCipherListResponse(
   ids: string[]
 ): Promise<Response> {
   const ciphers = await storage.getCiphersByIds(ids, userId);
-  const attachmentsByCipher = await storage.getAttachmentsByCipherIds(ciphers.map((cipher) => cipher.id));
+  // `getCiphersByIds` filters on `user_id`, so every cipher here is the
+  // user's own and the by-user lookup covers all of them -- one index seek
+  // instead of one per id. See `getAttachmentsForUserAndCiphers`.
+  const attachmentsByCipher = await storage.getAttachmentsForUserAndCiphers(userId, []);
 
   return jsonResponse({
     data: ciphers.map((cipher) =>

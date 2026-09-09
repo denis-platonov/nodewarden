@@ -4,7 +4,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { SCHEMA_STATEMENTS } from '../src/services/storage-schema';
 import { PERSONAL_CIPHER_ONLY } from '../src/services/storage-cipher-repo';
-import { ATTACHMENTS_BY_USER_SQL, ATTACHMENT_UPSERT_SQL } from '../src/services/storage-attachment-repo';
+import {
+  ATTACHMENTS_BY_USER_SQL,
+  ATTACHMENT_UPSERT_SQL,
+  getAttachmentsForUserAndCiphers,
+} from '../src/services/storage-attachment-repo';
 
 // Mirrors executeSchemaStatement: re-running the bootstrap must be a no-op, and
 // ALTER TABLE ADD COLUMN always fails once the column exists.
@@ -230,3 +234,109 @@ test('the bootstrap backfills user_id onto attachments written before the column
   assert.equal(row.user_id, 'u1');
   db.close();
 });
+
+test('a sync with no org ciphers asks for attachments exactly once', async () => {
+  const db = freshDb();
+  db.exec("INSERT INTO users(id, email, master_password_hash, key, kdf_type, kdf_iterations, security_stamp, created_at, updated_at) VALUES('u1', 'a@b.c', 'h', 'k', 0, 600000, 's', 'now', 'now')");
+  db.exec("INSERT INTO users(id, email, master_password_hash, key, kdf_type, kdf_iterations, security_stamp, created_at, updated_at) VALUES('u2', 'd@e.f', 'h', 'k', 0, 600000, 's', 'now', 'now')");
+  // A vault big enough that the old path would have batched it, and with no
+  // attachments at all -- the case that was costing one index seek per cipher
+  // on every sync to discover there was nothing to find.
+  for (let i = 0; i < 250; i++) {
+    db.exec(`INSERT INTO ciphers(id, user_id, type, data, created_at, updated_at) VALUES('c${i}', 'u1', 1, '{}', 'now', 'now')`);
+  }
+
+  const { db: spy, queries } = countingDb(db);
+  const grouped = await getAttachmentsForUserAndCiphers(spy as any, () => 100, 'u1', []);
+
+  assert.equal(grouped.size, 0);
+  assert.equal(
+    queries.length,
+    1,
+    `expected one query for a vault with no org ciphers, got ${JSON.stringify(queries)}`
+  );
+  assert.match(queries[0], /user_id = \?/);
+  assert.equal(/cipher_id IN/.test(queries[0]), false, queries[0]);
+  db.close();
+});
+
+test('org ciphers owned by somebody else still bring their attachments back', async () => {
+  const db = freshDb();
+  db.exec("INSERT INTO users(id, email, master_password_hash, key, kdf_type, kdf_iterations, security_stamp, created_at, updated_at) VALUES('u1', 'a@b.c', 'h', 'k', 0, 600000, 's', 'now', 'now')");
+  db.exec("INSERT INTO users(id, email, master_password_hash, key, kdf_type, kdf_iterations, security_stamp, created_at, updated_at) VALUES('u2', 'd@e.f', 'h', 'k', 0, 600000, 's', 'now', 'now')");
+  db.exec("INSERT INTO ciphers(id, user_id, type, data, created_at, updated_at) VALUES('mine', 'u1', 1, '{}', 'now', 'now')");
+  // Owned by u2, reachable by u1 through a collection. `attachments.user_id`
+  // is the OWNER's, so the by-user query cannot see this one -- which is the
+  // whole reason the org ids are still asked for by cipher.
+  db.exec("INSERT INTO ciphers(id, user_id, type, data, created_at, updated_at) VALUES('theirs', 'u2', 1, '{}', 'now', 'now')");
+  db.prepare(ATTACHMENT_UPSERT_SQL).run('a-mine', 'mine', 'mine', 'n', 1, '1 Byte', 'k');
+  db.prepare(ATTACHMENT_UPSERT_SQL).run('a-theirs', 'theirs', 'theirs', 'n', 1, '1 Byte', 'k');
+
+  const grouped = await getAttachmentsForUserAndCiphers(
+    countingDb(db).db as any,
+    () => 100,
+    'u1',
+    ['theirs']
+  );
+
+  assert.deepEqual(grouped.get('mine')?.map((a) => a.id), ['a-mine']);
+  assert.deepEqual(
+    grouped.get('theirs')?.map((a) => a.id),
+    ['a-theirs'],
+    'an org cipher owned by another user lost its attachment'
+  );
+  db.close();
+});
+
+test('an org cipher the user owns is not listed twice', async () => {
+  const db = freshDb();
+  db.exec("INSERT INTO users(id, email, master_password_hash, key, kdf_type, kdf_iterations, security_stamp, created_at, updated_at) VALUES('u1', 'a@b.c', 'h', 'k', 0, 600000, 's', 'now', 'now')");
+  db.exec("INSERT INTO ciphers(id, user_id, type, data, created_at, updated_at) VALUES('c1', 'u1', 1, '{}', 'now', 'now')");
+  db.prepare(ATTACHMENT_UPSERT_SQL).run('a1', 'c1', 'c1', 'n', 1, '1 Byte', 'k');
+
+  // The caller passes org ids without checking who owns them, which is what
+  // makes it safe to be careless there: this id comes back from BOTH queries.
+  const grouped = await getAttachmentsForUserAndCiphers(
+    countingDb(db).db as any,
+    () => 100,
+    'u1',
+    ['c1']
+  );
+
+  assert.deepEqual(
+    grouped.get('c1')?.map((a) => a.id),
+    ['a1'],
+    'the attachment was counted once per query rather than once per attachment'
+  );
+  db.close();
+});
+
+/**
+ * `node:sqlite` in D1's clothing: `prepare().bind().all()` returning
+ * `{ results }`, which is the shape the repo is written against.
+ *
+ * It also records the SQL, because one of these tests makes a claim about the
+ * NUMBER of queries issued and no assertion on the returned rows can reach
+ * that.
+ */
+function countingDb(db: any): { db: any; queries: string[] } {
+  const queries: string[] = [];
+  return {
+    queries,
+    db: {
+      prepare(sql: string) {
+        queries.push(sql);
+        const stmt = db.prepare(sql);
+        return {
+          bind(...args: any[]) {
+            return {
+              async all() {
+                return { results: stmt.all(...args) };
+              },
+            };
+          },
+        };
+      },
+    },
+  };
+}

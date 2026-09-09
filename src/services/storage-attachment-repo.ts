@@ -120,6 +120,64 @@ export async function getAttachmentsByCipherIds(
   return grouped;
 }
 
+/**
+ * Every attachment a sync has to describe: the user's own, plus any on
+ * ciphers reached through an organization's collections.
+ *
+ * WHY THIS EXISTS, and why the sync path does not simply call
+ * getAttachmentsByCipherIds:
+ *
+ * That function asks `WHERE cipher_id IN (?, ? ...)`, a hundred ids at a
+ * time. The planner serves each placeholder with a seek into
+ * idx_attachments_cipher, and D1 bills a seek as a row read whether or not it
+ * finds anything - so a 1,668-item vault with NO attachments at all paid
+ * ~1,700 row reads on every sync. Measured at 180,000 rows a day, which was
+ * more than reading the entire ciphers table cost. It is the same defect the
+ * note at the top of this file records, arriving by a second route.
+ *
+ * The user's own attachments are one seek into idx_attachments_user, so they
+ * come back in a single query. Org ciphers cannot: `attachments.user_id` is
+ * the OWNING user (see ATTACHMENT_UPSERT_SQL, which reads it out of the
+ * cipher), and a cipher reached through a collection is commonly owned by
+ * somebody else - so those ids are still asked for by cipher, in the same
+ * batches as before. An account with no org ciphers therefore makes one
+ * query; an account with them pays for those and no longer for its own vault.
+ *
+ * `orgCipherIds` may safely contain ids the user does own - an org they
+ * created themselves. A duplicate costs one extra seek and cannot
+ * double-count, because attachments are merged by their own id below.
+ */
+export async function getAttachmentsForUserAndCiphers(
+  db: D1Database,
+  sqlChunkSize: SqlChunkSize,
+  userId: string,
+  orgCipherIds: string[]
+): Promise<Map<string, Attachment[]>> {
+  const grouped = await getAttachmentsByUserId(db, userId);
+  if (orgCipherIds.length === 0) return grouped;
+
+  const seen = new Set<string>();
+  for (const list of grouped.values()) {
+    for (const attachment of list) seen.add(attachment.id);
+  }
+
+  const extra = await getAttachmentsByCipherIds(db, sqlChunkSize, orgCipherIds);
+  for (const [cipherId, list] of extra) {
+    for (const attachment of list) {
+      // Merged by ATTACHMENT id, not by cipher id: an org cipher the user
+      // also owns comes back from both queries, and appending blindly would
+      // show its file twice on the item.
+      if (seen.has(attachment.id)) continue;
+      seen.add(attachment.id);
+      const existing = grouped.get(cipherId);
+      if (existing) existing.push(attachment);
+      else grouped.set(cipherId, [attachment]);
+    }
+  }
+
+  return grouped;
+}
+
 export async function getAttachmentsByUserId(db: D1Database, userId: string): Promise<Map<string, Attachment[]>> {
   const grouped = new Map<string, Attachment[]>();
   const res = await db.prepare(ATTACHMENTS_BY_USER_SQL).bind(userId).all<any>();
