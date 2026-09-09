@@ -97,6 +97,7 @@ CREATE INDEX IF NOT EXISTS idx_folders_user_updated ON folders(user_id, updated_
 CREATE TABLE IF NOT EXISTS attachments (
   id TEXT PRIMARY KEY,
   cipher_id TEXT NOT NULL,
+  user_id TEXT,
   file_name TEXT NOT NULL,
   size INTEGER NOT NULL,
   size_name TEXT NOT NULL,
@@ -104,6 +105,12 @@ CREATE TABLE IF NOT EXISTS attachments (
   FOREIGN KEY (cipher_id) REFERENCES ciphers(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_attachments_cipher ON attachments(cipher_id);
+-- user_id is denormalised from the owning cipher. Without it, listing a user's
+-- attachments has to join into ciphers, and the planner drives that join from
+-- ciphers: one index row per cipher in the vault, whether or not any attachment
+-- exists. The cipher_id foreign key still owns deletion; this column is a copy,
+-- not a second source of truth.
+CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id, cipher_id);
 
 CREATE TABLE IF NOT EXISTS sends (
   id TEXT PRIMARY KEY,

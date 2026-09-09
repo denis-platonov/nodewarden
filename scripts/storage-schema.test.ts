@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { SCHEMA_STATEMENTS } from '../src/services/storage-schema';
 import { PERSONAL_CIPHER_ONLY } from '../src/services/storage-cipher-repo';
+import { ATTACHMENTS_BY_USER_SQL, ATTACHMENT_UPSERT_SQL } from '../src/services/storage-attachment-repo';
 
 // Mirrors executeSchemaStatement: re-running the bootstrap must be a no-op, and
 // ALTER TABLE ADD COLUMN always fails once the column exists.
@@ -172,5 +173,60 @@ test('bulk mutations leave organization ciphers untouched', () => {
   const remaining = db.prepare('SELECT id FROM ciphers ORDER BY id').all().map((row: any) => String(row.id));
   // Only the personal cipher is deleted; both org ciphers survive.
   assert.deepEqual(remaining, ['org-a', 'org-b']);
+  db.close();
+});
+
+// The user's attachments used to be found by joining into ciphers, which the
+// planner drives from the ciphers side: one index row per cipher in the vault
+// on every sync, even for a vault holding no attachments at all. The
+// denormalised user_id is what keeps that lookup proportional to the answer.
+test('listing the attachments for a user reads attachments only', () => {
+  const db = freshDb();
+  db.exec("INSERT INTO users(id, email, master_password_hash, key, kdf_type, kdf_iterations, security_stamp, created_at, updated_at) VALUES('u1', 'a@b.c', 'h', 'k', 0, 600000, 's', 'now', 'now')");
+  db.exec("INSERT INTO ciphers(id, user_id, type, data, created_at, updated_at) VALUES('c1', 'u1', 1, '{}', 'now', 'now')");
+
+  const plan = db
+    .prepare(`EXPLAIN QUERY PLAN ${ATTACHMENTS_BY_USER_SQL}`)
+    .all()
+    .map((row: any) => String(row.detail));
+
+  assert.equal(plan.length, 1, `expected a single lookup, got ${JSON.stringify(plan)}`);
+  assert.match(plan[0], /idx_attachments_user/);
+  // Nothing may reach ciphers: that is the row count this fix removed.
+  for (const step of plan) {
+    assert.equal(/ciphers/.test(step), false, `plan still reads ciphers: ${step}`);
+  }
+  db.close();
+});
+
+test('saving an attachment copies the owning cipher user onto the row', () => {
+  const db = freshDb();
+  db.exec("INSERT INTO users(id, email, master_password_hash, key, kdf_type, kdf_iterations, security_stamp, created_at, updated_at) VALUES('u1', 'a@b.c', 'h', 'k', 0, 600000, 's', 'now', 'now')");
+  db.exec("INSERT INTO ciphers(id, user_id, type, data, created_at, updated_at) VALUES('c1', 'u1', 1, '{}', 'now', 'now')");
+
+  // The caller never supplies user_id; the statement reads it off the cipher.
+  db.prepare(ATTACHMENT_UPSERT_SQL).run('a1', 'c1', 'c1', 'enc-name', 10, '10 Bytes', 'enc-key');
+
+  const row: any = db.prepare(`${ATTACHMENTS_BY_USER_SQL.replace('?', "'u1'")}`).get();
+  assert.equal(row.id, 'a1');
+  assert.equal(row.cipher_id, 'c1');
+  db.close();
+});
+
+test('the bootstrap backfills user_id onto attachments written before the column', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  // The pre-column shape, as an installed instance would have it.
+  db.exec("CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT, master_password_hint TEXT, master_password_hash TEXT NOT NULL, key TEXT NOT NULL, private_key TEXT, public_key TEXT, kdf_type INTEGER NOT NULL, kdf_iterations INTEGER NOT NULL, kdf_memory INTEGER, kdf_parallelism INTEGER, security_stamp TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', status TEXT NOT NULL DEFAULT 'active', verify_devices INTEGER NOT NULL DEFAULT 0, totp_secret TEXT, totp_recovery_code TEXT, yubikey_key1 TEXT, yubikey_key2 TEXT, yubikey_key3 TEXT, yubikey_key4 TEXT, yubikey_key5 TEXT, yubikey_nfc INTEGER NOT NULL DEFAULT 0, api_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
+  db.exec("CREATE TABLE ciphers (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, type INTEGER NOT NULL, folder_id TEXT, name TEXT, notes TEXT, favorite INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL, reprompt INTEGER, key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT, deleted_at TEXT, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)");
+  db.exec('CREATE TABLE attachments (id TEXT PRIMARY KEY, cipher_id TEXT NOT NULL, file_name TEXT NOT NULL, size INTEGER NOT NULL, size_name TEXT NOT NULL, key TEXT, FOREIGN KEY (cipher_id) REFERENCES ciphers(id) ON DELETE CASCADE)');
+  db.exec("INSERT INTO users(id, email, master_password_hash, key, kdf_type, kdf_iterations, security_stamp, created_at, updated_at) VALUES('u1', 'a@b.c', 'h', 'k', 0, 600000, 's', 'now', 'now')");
+  db.exec("INSERT INTO ciphers(id, user_id, type, data, created_at, updated_at) VALUES('c1', 'u1', 1, '{}', 'now', 'now')");
+  db.exec("INSERT INTO attachments(id, cipher_id, file_name, size, size_name) VALUES('a1', 'c1', 'enc-name', 10, '10 Bytes')");
+
+  applySchema(db);
+
+  const row: any = db.prepare("SELECT user_id FROM attachments WHERE id = 'a1'").get();
+  assert.equal(row.user_id, 'u1');
   db.close();
 });

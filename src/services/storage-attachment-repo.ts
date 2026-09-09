@@ -6,6 +6,24 @@ type GetCipher = (id: string) => Promise<Cipher | null>;
 type SaveCipher = (cipher: Cipher) => Promise<void>;
 type UpdateRevisionDate = (userId: string) => Promise<string>;
 
+// Attachments are scoped by their own user_id, never by a join into ciphers:
+// the planner serves such a join from the ciphers side and reads one index row
+// per cipher in the vault, so a vault with no attachments still paid for every
+// cipher on every sync. Both statements are exported so the schema test can
+// assert that shape holds - the SELECT touches only attachments, and the INSERT
+// keeps the denormalised copy in step with the owning cipher.
+export const ATTACHMENTS_BY_USER_SQL =
+  'SELECT id, cipher_id, file_name, size, size_name, key FROM attachments WHERE user_id = ?';
+
+export const ATTACHMENT_UPSERT_SQL =
+  'INSERT INTO attachments(id, cipher_id, user_id, file_name, size, size_name, key) ' +
+  'VALUES(?, ?, (SELECT user_id FROM ciphers WHERE id = ?), ?, ?, ?, ?) ' +
+  'ON CONFLICT(id) DO UPDATE SET cipher_id=excluded.cipher_id, user_id=excluded.user_id, file_name=excluded.file_name, size=excluded.size, size_name=excluded.size_name, key=excluded.key ' +
+  'WHERE EXISTS (' +
+  'SELECT 1 FROM ciphers current_cipher INNER JOIN ciphers next_cipher ON next_cipher.id = excluded.cipher_id ' +
+  'WHERE current_cipher.id = attachments.cipher_id AND current_cipher.user_id = next_cipher.user_id' +
+  ')';
+
 export async function getAttachment(db: D1Database, id: string): Promise<Attachment | null> {
   const row = await db
     .prepare('SELECT id, cipher_id, file_name, size, size_name, key FROM attachments WHERE id = ?')
@@ -23,15 +41,11 @@ export async function getAttachment(db: D1Database, id: string): Promise<Attachm
 }
 
 export async function saveAttachment(db: D1Database, safeBind: SafeBind, attachment: Attachment): Promise<void> {
-  const stmt = db.prepare(
-    'INSERT INTO attachments(id, cipher_id, file_name, size, size_name, key) VALUES(?, ?, ?, ?, ?, ?) ' +
-    'ON CONFLICT(id) DO UPDATE SET cipher_id=excluded.cipher_id, file_name=excluded.file_name, size=excluded.size, size_name=excluded.size_name, key=excluded.key ' +
-    'WHERE EXISTS (' +
-    'SELECT 1 FROM ciphers current_cipher INNER JOIN ciphers next_cipher ON next_cipher.id = excluded.cipher_id ' +
-    'WHERE current_cipher.id = attachments.cipher_id AND current_cipher.user_id = next_cipher.user_id' +
-    ')'
-  );
-  await safeBind(stmt, attachment.id, attachment.cipherId, attachment.fileName, attachment.size, attachment.sizeName, attachment.key).run();
+  // user_id is read off the owning cipher rather than taken from the caller, so
+  // the denormalised copy cannot drift from the row it was copied from. The
+  // lookup is a primary key seek.
+  const stmt = db.prepare(ATTACHMENT_UPSERT_SQL);
+  await safeBind(stmt, attachment.id, attachment.cipherId, attachment.cipherId, attachment.fileName, attachment.size, attachment.sizeName, attachment.key).run();
 }
 
 export async function deleteAttachment(db: D1Database, id: string): Promise<void> {
@@ -108,15 +122,7 @@ export async function getAttachmentsByCipherIds(
 
 export async function getAttachmentsByUserId(db: D1Database, userId: string): Promise<Map<string, Attachment[]>> {
   const grouped = new Map<string, Attachment[]>();
-  const res = await db
-    .prepare(
-      `SELECT a.id, a.cipher_id, a.file_name, a.size, a.size_name, a.key
-       FROM attachments a
-       INNER JOIN ciphers c ON c.id = a.cipher_id
-       WHERE c.user_id = ?`
-    )
-    .bind(userId)
-    .all<any>();
+  const res = await db.prepare(ATTACHMENTS_BY_USER_SQL).bind(userId).all<any>();
 
   for (const row of res.results || []) {
     const item: Attachment = {
@@ -136,7 +142,10 @@ export async function getAttachmentsByUserId(db: D1Database, userId: string): Pr
 }
 
 export async function addAttachmentToCipher(db: D1Database, cipherId: string, attachmentId: string): Promise<void> {
-  await db.prepare('UPDATE attachments SET cipher_id = ? WHERE id = ?').bind(cipherId, attachmentId).run();
+  await db
+    .prepare('UPDATE attachments SET cipher_id = ?, user_id = (SELECT user_id FROM ciphers WHERE id = ?) WHERE id = ?')
+    .bind(cipherId, cipherId, attachmentId)
+    .run();
 }
 
 export async function addAttachmentToCipherForUser(
@@ -145,10 +154,12 @@ export async function addAttachmentToCipherForUser(
   attachmentId: string,
   userId: string
 ): Promise<void> {
+  // The first EXISTS already proves the target cipher belongs to userId, so the
+  // denormalised user_id can be written straight from the caller's scope.
   await db
     .prepare(
       `UPDATE attachments
-       SET cipher_id = ?
+       SET cipher_id = ?, user_id = ?
        WHERE id = ?
          AND EXISTS (
            SELECT 1 FROM ciphers target_cipher
@@ -159,7 +170,7 @@ export async function addAttachmentToCipherForUser(
            WHERE current_cipher.id = attachments.cipher_id AND current_cipher.user_id = ?
          )`
     )
-    .bind(cipherId, attachmentId, cipherId, userId, userId)
+    .bind(cipherId, userId, attachmentId, cipherId, userId, userId)
     .run();
 }
 

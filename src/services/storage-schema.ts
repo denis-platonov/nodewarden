@@ -56,10 +56,17 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_folders_user_updated ON folders(user_id, updated_at)',
 
   'CREATE TABLE IF NOT EXISTS attachments (' +
-  'id TEXT PRIMARY KEY, cipher_id TEXT NOT NULL, file_name TEXT NOT NULL, size INTEGER NOT NULL, ' +
+  'id TEXT PRIMARY KEY, cipher_id TEXT NOT NULL, user_id TEXT, file_name TEXT NOT NULL, size INTEGER NOT NULL, ' +
   'size_name TEXT NOT NULL, key TEXT, ' +
   'FOREIGN KEY (cipher_id) REFERENCES ciphers(id) ON DELETE CASCADE)',
+  // user_id is a copy of the owning cipher's owner. Joining attachments to
+  // ciphers to scope by user makes the planner drive the join from ciphers, so
+  // it reads one index row per cipher in the vault even when the vault has no
+  // attachments at all. The column lets that lookup be a single index seek.
+  'ALTER TABLE attachments ADD COLUMN user_id TEXT',
   'CREATE INDEX IF NOT EXISTS idx_attachments_cipher ON attachments(cipher_id)',
+  'CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id, cipher_id)',
+  'UPDATE attachments SET user_id = (SELECT ciphers.user_id FROM ciphers WHERE ciphers.id = attachments.cipher_id) WHERE user_id IS NULL',
 
   'CREATE TABLE IF NOT EXISTS sends (' +
   'id TEXT PRIMARY KEY, user_id TEXT NOT NULL, type INTEGER NOT NULL, name TEXT NOT NULL, notes TEXT, data TEXT NOT NULL, ' +

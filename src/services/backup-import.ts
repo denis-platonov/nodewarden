@@ -714,8 +714,18 @@ async function importBackupRows(db: D1Database, payload: BackupPayload['db'], us
   await runInsertBatch(
     db,
     tableName('attachments'),
-    buildInsertStatements(db, tableName('attachments'), ['id', 'cipher_id', 'file_name', 'size', 'size_name', 'key'], payload.attachments || [])
+    buildInsertStatements(db, tableName('attachments'), ['id', 'cipher_id', 'user_id', 'file_name', 'size', 'size_name', 'key'], payload.attachments || [])
   );
+  // Archives written before attachments carried user_id restore it as NULL,
+  // which would hide those rows from the user-scoped lookup. Derive it from the
+  // ciphers just restored alongside them.
+  await db
+    .prepare(
+      `UPDATE ${tableName('attachments')} SET user_id = ` +
+      `(SELECT c.user_id FROM ${tableName('ciphers')} c WHERE c.id = ${tableName('attachments')}.cipher_id) ` +
+      'WHERE user_id IS NULL'
+    )
+    .run();
   await runInsertBatch(
     db,
     tableName('organizations'),
