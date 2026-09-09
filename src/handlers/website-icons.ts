@@ -1,4 +1,5 @@
 import { LIMITS } from '../config/limits';
+import { areThirdPartyIconSourcesAllowed } from '../services/website-icon-settings';
 import type { Env } from '../types';
 import { isSafeWebsiteIconContentType } from '../utils/content-type';
 
@@ -56,20 +57,11 @@ const NON_PUBLIC_ICON_HOST_SUFFIXES = [
  * Whether the icon endpoint answers at all. It always does: the direct-origin
  * source below needs no third party and is the private option, so there is
  * nothing here for a deployment to turn off. The third-party fallbacks have
- * their own switch - see areThirdPartyIconSourcesEnabled.
+ * their own switch - DISABLE_THIRD_PARTY_ICONS, or the stored setting behind
+ * areThirdPartyIconSourcesAllowed.
  */
 export function isWebsiteIconProxyEnabled(env: Env): boolean {
   return true;
-}
-
-/**
- * Whether the endpoint may fall back to favicon.im and icons.bitwarden.net.
- * Set DISABLE_THIRD_PARTY_ICONS=1 to keep every icon lookup between this
- * server and the site the entry is for; sites that answer none of
- * DIRECT_ICON_PATHS then get the placeholder instead.
- */
-export function areThirdPartyIconSourcesEnabled(env: Env): boolean {
-  return String(env.DISABLE_THIRD_PARTY_ICONS || '').trim() !== '1';
 }
 
 function getDefaultWebsiteIconSvg(): string {
@@ -181,51 +173,51 @@ type IconSource = {
 };
 
 /**
- * Every source for one host, in the order they are tried.
+ * The site's own paths, tried before anything else.
  *
  * Direct first: it is the only private option and, for a site that answers,
- * the fastest one. favicon.im and icons.bitwarden.net keep their existing
- * order behind it. That order is no longer about speed - direct-first settled
- * that - but about how few requests each third party sees: whichever is last
- * is asked only about the domains the one before it also missed, and
- * icons.bitwarden.net is the service a self-hosted server exists to avoid.
- * It is also the weaker signal of the two, answering a generic globe rather
- * than a 404 for a domain it does not know, which the hash below has to
- * undo.
+ * the fastest one.
+ *
+ * https only, never a downgrade to http: a plaintext request announces which
+ * domain is being asked about to every hop in between, which is the disclosure
+ * this whole change is about.
  */
-export function buildIconSources(env: Env, normalizedHost: string): IconSource[] {
-  const sources: IconSource[] = [];
+export function buildDirectIconSources(normalizedHost: string): IconSource[] {
+  if (!isPublicIconHost(normalizedHost)) return [];
+  return DIRECT_ICON_PATHS.map((path) => ({
+    url: `https://${normalizedHost}/${path}`,
+    direct: true,
+    timeoutMs: ICON_DIRECT_TIMEOUT_MS,
+  }));
+}
 
-  // https only, never a downgrade to http: a plaintext request announces
-  // which domain is being asked about to every hop in between, which is the
-  // disclosure this whole change is about.
-  if (isPublicIconHost(normalizedHost)) {
-    for (const path of DIRECT_ICON_PATHS) {
-      sources.push({
-        url: `https://${normalizedHost}/${path}`,
-        direct: true,
-        timeoutMs: ICON_DIRECT_TIMEOUT_MS,
-      });
-    }
-  }
-
-  if (areThirdPartyIconSourcesEnabled(env)) {
-    const encodedHost = encodeURIComponent(normalizedHost);
-    sources.push({
+/**
+ * favicon.im and icons.bitwarden.net, in their existing order, for a host the
+ * site itself would not answer for.
+ *
+ * That order is no longer about speed - direct-first settled that - but about
+ * how few requests each third party sees: whichever is last is asked only
+ * about the domains the one before it also missed, and icons.bitwarden.net is
+ * the service a self-hosted server exists to avoid. It is also the weaker
+ * signal of the two, answering a generic globe rather than a 404 for a domain
+ * it does not know, which the hash below has to undo.
+ */
+export function buildThirdPartyIconSources(normalizedHost: string): IconSource[] {
+  const encodedHost = encodeURIComponent(normalizedHost);
+  return [
+    {
       url: `https://favicon.im/zh/${encodedHost}?larger=true&throw-error-on-404=true`,
       timeoutMs: ICON_UPSTREAM_TIMEOUT_MS,
-    });
-    sources.push({
+    },
+    {
       url: `https://icons.bitwarden.net/${encodedHost}/icon.png`,
       timeoutMs: ICON_UPSTREAM_TIMEOUT_MS,
       rejectImage: {
         byteLength: BITWARDEN_DEFAULT_GLOBE_ICON_BYTES,
         sha256: BITWARDEN_DEFAULT_GLOBE_ICON_SHA256,
       },
-    });
-  }
-
-  return sources;
+    },
+  ];
 }
 
 function remainingMs(deadlineAt: number): number {
@@ -377,22 +369,19 @@ function iconResponse(body: BodyInit | null, contentType: string | null): Respon
   });
 }
 
-export async function handleWebsiteIcon(
-  env: Env,
-  host: string,
-  fallbackMode: 'default' | 'not-found' = 'default'
-): Promise<Response> {
-  const fallback = () => (fallbackMode === 'not-found' ? handleMissingWebsiteIcon() : handleNwFavicon());
-
-  if (!isWebsiteIconProxyEnabled(env)) return fallback();
-
-  const normalizedHost = normalizeIconHost(host);
-  if (!normalizedHost) return fallback();
-
-  const totalDeadlineAt = Date.now() + ICON_TOTAL_BUDGET_MS;
+/**
+ * Walks one stage's sources and returns the first that produced an icon.
+ *
+ * totalDeadlineAt is shared across stages, so a slow origin still cannot make
+ * a miss cost more than ICON_TOTAL_BUDGET_MS overall.
+ */
+async function resolveIconFromSources(
+  sources: IconSource[],
+  totalDeadlineAt: number
+): Promise<Response | null> {
   let directHostUnreachable = false;
 
-  for (const source of buildIconSources(env, normalizedHost)) {
+  for (const source of sources) {
     if (source.direct && directHostUnreachable) continue;
 
     const budgetMs = Math.min(source.timeoutMs, remainingMs(totalDeadlineAt));
@@ -436,5 +425,37 @@ export async function handleWebsiteIcon(
     return iconResponse(bytes, response.headers.get('Content-Type'));
   }
 
-  return fallback();
+  return null;
+}
+
+export async function handleWebsiteIcon(
+  env: Env,
+  host: string,
+  fallbackMode: 'default' | 'not-found' = 'default'
+): Promise<Response> {
+  const fallback = () => (fallbackMode === 'not-found' ? handleMissingWebsiteIcon() : handleNwFavicon());
+
+  if (!isWebsiteIconProxyEnabled(env)) return fallback();
+
+  const normalizedHost = normalizeIconHost(host);
+  if (!normalizedHost) return fallback();
+
+  const totalDeadlineAt = Date.now() + ICON_TOTAL_BUDGET_MS;
+
+  const direct = await resolveIconFromSources(buildDirectIconSources(normalizedHost), totalDeadlineAt);
+  if (direct) return direct;
+  // A budget already spent on the origin buys nothing from a third party, and
+  // must not buy a config read either.
+  if (remainingMs(totalDeadlineAt) <= 0) return fallback();
+
+  // Only now is the setting consulted, and this is what keeps a D1 read off
+  // the common path entirely: a site that serves its own favicon is answered
+  // without this server ever asking whether it may talk to a third party.
+  if (!(await areThirdPartyIconSourcesAllowed(env))) return fallback();
+
+  const upstream = await resolveIconFromSources(
+    buildThirdPartyIconSources(normalizedHost),
+    totalDeadlineAt
+  );
+  return upstream || fallback();
 }

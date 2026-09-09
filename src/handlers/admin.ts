@@ -7,6 +7,13 @@ import { transferOrganizationDataOnUserDelete } from '../services/storage-organi
 import { bumpUserRevisions } from '../utils/revision';
 import { readActingDeviceIdentifier } from '../utils/device';
 import { auditRequestMetadata, getAuditLogSettings, normalizeAuditLogSettings, saveAuditLogSettings, writeAuditEvent } from '../services/audit-events';
+import {
+  describeWebsiteIconSettings,
+  getWebsiteIconSettings,
+  normalizeWebsiteIconSettings,
+  saveWebsiteIconSettings,
+  type WebsiteIconSettings,
+} from '../services/website-icon-settings';
 
 function isAdmin(user: User): boolean {
   return user.role === 'admin' && user.status === 'active';
@@ -222,6 +229,50 @@ export async function handleAdminClearAuditLogs(
     deleted,
   }, request);
   return jsonResponse({ object: 'auditLogClear', deleted });
+}
+
+function websiteIconSettingsResponse(env: Env, settings: WebsiteIconSettings): Response {
+  return jsonResponse({
+    object: 'websiteIconSettings',
+    ...describeWebsiteIconSettings(env, settings),
+  });
+}
+
+// GET /api/admin/icons/settings
+export async function handleAdminGetWebsiteIconSettings(
+  request: Request,
+  env: Env,
+  actorUser: User
+): Promise<Response> {
+  void request;
+  if (!isAdmin(actorUser)) {
+    return errorResponse('Forbidden', 403);
+  }
+  const storage = new StorageService(env.DB);
+  return websiteIconSettingsResponse(env, await getWebsiteIconSettings(storage));
+}
+
+// PUT /api/admin/icons/settings
+export async function handleAdminUpdateWebsiteIconSettings(
+  request: Request,
+  env: Env,
+  actorUser: User
+): Promise<Response> {
+  if (!isAdmin(actorUser)) {
+    return errorResponse('Forbidden', 403);
+  }
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+  const storage = new StorageService(env.DB);
+  const settings = await saveWebsiteIconSettings(storage, normalizeWebsiteIconSettings(body));
+  await writeAuditLog(storage, actorUser.id, 'admin.icons.settings.update', 'websiteIcons', null, {
+    status: settings.thirdPartySourcesEnabled ? 'enabled' : 'disabled',
+  }, request);
+  return websiteIconSettingsResponse(env, settings);
 }
 
 // POST /api/admin/invites

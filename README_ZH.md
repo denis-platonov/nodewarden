@@ -80,7 +80,7 @@
 
 - 如需隐藏 Web Vault，在 Workers 的“设置 → 变量和机密”中添加文本变量 `HIDE_WEB_VAULT`，值设为 `1`。启用后，服务器上的前端页面和静态资源统一返回 `404 Not Found`，Bitwarden 客户端所需的登录、同步、附件、图标、通知等服务端接口仍可使用；已经安装或缓存的 PWA 可以继续使用本地前端。删除该变量（或将值改为非 `1`）即可恢复服务器上的 Web Vault。
 
-- 网站图标（`/icons/{domain}/icon.png`）优先向站点自身获取：依次尝试 `https://{domain}/favicon.ico`、`/favicon.png`、`/apple-touch-icon.png`，整个查询只发生在你的服务器与你本来就有账号的站点之间。只有这三个路径都没有图标时，才会按顺序回退到两个外部服务：[favicon.im](https://favicon.im) 与 `icons.bitwarden.net`。这两个回退会把密码库中的域名告诉第三方。如需关闭，在 Workers 的“设置 → 变量和机密”中添加文本变量 `DISABLE_THIRD_PARTY_ICONS`，值设为 `1`；直接获取仍然可用，站点没有图标时显示通用占位图。直接获取仅限公网域名——IP 地址以及私有、保留或单段主机名一律不请求——跳转也只跟随到另一个公网 `https` 主机。
+- 网站图标（`/icons/{domain}/icon.png`）优先向站点自身获取：依次尝试 `https://{domain}/favicon.ico`、`/favicon.png`、`/apple-touch-icon.png`，整个查询只发生在你的服务器与你本来就有账号的站点之间。只有这三个路径都没有图标时，才会按顺序回退到两个外部服务：[favicon.im](https://favicon.im) 与 `icons.bitwarden.net`。这两个回退会把密码库中的域名告诉第三方，关闭方式有两种：要么在 Workers 的“设置 → 变量和机密”中添加文本变量 `DISABLE_THIRD_PARTY_ICONS`，值设为 `1`；要么调用 `PUT /api/admin/icons/settings`（仅管理员，请求体 `{"thirdPartySourcesEnabled": false}`），该选项保存在数据库中，无需重新部署。**环境变量优先。** 只要设置了 `DISABLE_THIRD_PARTY_ICONS=1`，无论数据库中的设置为何，第三方回退都处于关闭状态—— 运维者在 Worker 配置层面做出的锁定，不应该被一条数据库记录推翻。未设置该变量时，由数据库中的设置决定；两者都没有时保持允许回退，因此升级不会改变现有行为。`GET /api/admin/icons/settings` 会同时返回存储的设置和实际生效的结果。修改存储设置后，最多一分钟内在整个部署生效：每个 Worker isolate 最多缓存该值 60 秒，以免每次图标查询都多一次数据库读取。无论采用哪种方式，直接获取仍然可用，站点没有图标时显示通用占位图。直接获取仅限公网域名——IP 地址以及私有、保留或单段主机名一律不请求——跳转也只跟随到另一个公网 `https` 主机。
 
 - 这套流程里，用户实际做的是把代码交给 Cloudflare 构建并部署。代码里的 `wrangler.toml` 或 `wrangler.kv.toml` 决定绑定名，Worker 第一次处理请求时会自动初始化 D1 schema，不需要用户上传 SQL。
 

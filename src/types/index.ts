@@ -11,6 +11,10 @@ export interface Env {
   // Set to "1" to stop /icons from falling back to favicon.im and
   // icons.bitwarden.net. Icons are then only ever fetched from the site the
   // vault entry is for, and sites that serve none get the placeholder.
+  //
+  // This is the harder of the two controls: it wins over the stored setting at
+  // icons.settings.v1, which only decides when this variable is absent. See
+  // services/website-icon-settings.ts.
   DISABLE_THIRD_PARTY_ICONS?: string;
   // Prefer R2 when available. Optional to support KV-only deployments.
   ATTACHMENTS?: R2Bucket;
