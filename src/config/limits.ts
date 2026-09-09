@@ -134,9 +134,15 @@
     preflightMaxAgeSeconds: 86400,
   },
   cache: {
-    // Icon proxy cache TTL in seconds.
-    // 图标代理缓存时长（秒）。
+    // Icon proxy cache TTL in seconds. Only a real icon earns it.
+    // 图标代理缓存时长（秒），仅对真实图标生效。
     iconTtlSeconds: 604800,
+    // Cache TTL for an icon miss: the placeholder, the 404, and upstream
+    // error statuses. A timeout is a fact about one second, not about the
+    // domain, so it must expire in minutes rather than in a week.
+    // 图标兜底（占位图 / 404 / 上游错误状态）缓存时长（秒）。超时只说明当下这一刻，
+    // 并非该域名本身没有图标，因此只缓存数分钟而不是一周。
+    iconFallbackTtlSeconds: 300,
     // In-memory /api/sync response cache TTL (milliseconds).
     // /api/sync 内存缓存有效期（毫秒）。
     syncResponseTtlMs: 30 * 1000,

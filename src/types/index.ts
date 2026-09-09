@@ -8,6 +8,10 @@ export interface Env {
   };
   // Set to "1" to return 404 for the Web Vault while keeping client APIs available.
   HIDE_WEB_VAULT?: string;
+  // Set to "1" to stop /icons from falling back to favicon.im and
+  // icons.bitwarden.net. Icons are then only ever fetched from the site the
+  // vault entry is for, and sites that serve none get the placeholder.
+  DISABLE_THIRD_PARTY_ICONS?: string;
   // Prefer R2 when available. Optional to support KV-only deployments.
   ATTACHMENTS?: R2Bucket;
   // Optional fallback for attachment/send file storage (no credit card required).

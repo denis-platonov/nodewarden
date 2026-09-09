@@ -80,6 +80,8 @@
 
 - To hide the Web Vault, add a text variable named `HIDE_WEB_VAULT` with the value `1` under **Workers settings → Variables and Secrets**. While enabled, server-hosted frontend pages and static assets return `404 Not Found`, while the login, sync, attachment, icon, notification, and other server endpoints used by Bitwarden clients remain available; an already installed or cached PWA can continue using its local frontend. Delete the variable (or change it to anything other than `1`) to restore the server-hosted Web Vault.
 
+- Website icons (`/icons/{domain}/icon.png`) are resolved by asking the site itself first — `https://{domain}/favicon.ico`, then `/favicon.png`, then `/apple-touch-icon.png` — which keeps the lookup between your server and a site you already have an account with. Only if the site serves none of them does the Worker fall back to two external services, in order: [favicon.im](https://favicon.im) and `icons.bitwarden.net`. Those fallbacks tell a third party which domains are in your vault. To turn them off, add a text variable named `DISABLE_THIRD_PARTY_ICONS` with the value `1` under **Workers settings → Variables and Secrets**; direct fetching keeps working and sites that serve no icon get a generic placeholder instead. Direct fetching is limited to public domain names — IP addresses and private, reserved or single-label hostnames are never fetched — and a redirect is only followed to another public `https` host.
+
 - In this flow you hand code to Cloudflare to build and deploy. `wrangler.toml` or `wrangler.kv.toml` in the repo defines binding names; the Worker initializes the D1 schema on first request—no manual SQL upload.
 
 

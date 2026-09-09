@@ -20,6 +20,7 @@
     "test:sso": "tsx --test scripts/sso-id-token.test.ts",
     "test:schema": "tsx --test scripts/storage-schema.test.ts",
     "test:web-crypto": "tsx --test scripts/web-crypto-availability.test.ts",
+    "test:website-icons": "tsx --test scripts/website-icons.test.ts",
     "test:webauthn-mobile": "node --test scripts/webauthn-mobile-connector.test.mjs",
     "test:webauthn-connector": "node --test scripts/webauthn-connector.test.mjs && tsx --test scripts/webauthn-connector-headers.test.ts",
     "test:webauthn-connectors": "node --test scripts/webauthn-mobile-connector.test.mjs scripts/webauthn-connector.test.mjs && tsx --test scripts/webauthn-connector-headers.test.ts",
