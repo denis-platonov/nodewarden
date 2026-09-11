@@ -106,9 +106,41 @@
     // Max file size allowed for Send file uploads.
     // Send 文件上传大小上限。
     maxFileSizeBytes: 100 * 1024 * 1024,
-    // Max days allowed between now and deletion date.
+    // Max days allowed between now and a *finite* deletion date. Ten years.
     // 允许的最远删除日期（距当前天数）。
-    maxDeletionDays: 31,
+    //
+    // This bound is not product policy about how long a link may live; it is a
+    // sanity check that a finite date is a plausible one. Two mistakes reach
+    // this field in practice -- a mistyped year (2226 for 2026) and a
+    // seconds-vs-milliseconds epoch mix-up -- and both land centuries out, so a
+    // decade rejects them without second-guessing a sender who genuinely wants
+    // a link to outlive a year. Clients offer at most twelve months of preset
+    // lifetimes plus a date the user picks, so nothing this server ships
+    // against comes near the ceiling by accident.
+    //
+    // Raised from 31 because 31 was never a real bound either: it was the
+    // upstream Bitwarden cloud's quota copied into a self-hosted server that
+    // has no quota, and it made "keep this link for a quarter" impossible to
+    // express. "Forever" is NOT expressed by pushing this number up -- it has
+    // its own value, `neverDeletionDate` below.
+    maxDeletionDays: 3653,
+    // The one deletion date that means "this Send does not expire".
+    //
+    // A sentinel instant rather than a null column. `deletionDate` is NOT NULL
+    // in the D1 schema and in `storage-schema.ts`, every read path
+    // (`isSendAvailable`, `incrementSendAccessCount`'s `deletion_date > ?`) and
+    // both response mappers treat it as a string that is always there, and
+    // other Bitwarden clients render it without a null branch. Nulling it would
+    // mean a migration, four call-site changes and a wire shape existing
+    // clients have never seen; the sentinel changes nothing anywhere and is
+    // still true, because this server runs no cleanup job -- a Send whose
+    // deletion date is in the year 9999 is a Send that genuinely never expires.
+    //
+    // 9999-12-31T23:59:59.999Z specifically: it is the largest four-digit-year
+    // ISO instant, it round-trips exactly through `new Date(..).toISOString()`,
+    // and it sorts last lexicographically among ISO `Z` strings -- which is
+    // what the SQL comparison and `idx_sends_user_deletion` actually do.
+    neverDeletionDate: '9999-12-31T23:59:59.999Z',
   },
   organizations: {
     // Organizations a single account may own. Creating one grants premium

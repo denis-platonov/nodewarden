@@ -216,6 +216,12 @@ export function isSendAvailable(send: Send): boolean {
     }
   }
 
+  // A never-expires Send carries `LIMITS.send.neverDeletionDate`, which is a
+  // real instant in the year 9999 -- so this comparison needs no arm for it and
+  // deliberately has none. The sentinel was chosen to be a date precisely so
+  // that every read path that already asks "is the deadline past?" keeps
+  // working unchanged, including the SQL `deletion_date > ?` in
+  // `storage-send-repo.ts`, where ISO `Z` strings compare lexicographically.
   const deletionMs = new Date(send.deletionDate).getTime();
   if (!Number.isNaN(deletionMs) && now >= deletionMs) {
     return false;
@@ -314,11 +320,43 @@ export function verifySendPasswordHashB64(send: Send, passwordHashB64: string): 
   return constantTimeEqual(expected, provided);
 }
 
+/**
+ * The instant that means "this Send never expires".
+ *
+ * Parsed once from `LIMITS.send.neverDeletionDate` so the comparison below is
+ * numeric and therefore tolerant of how a client spells it: `...999Z` and
+ * `...999+00:00` are the same moment and must both count as never.
+ */
+const NEVER_DELETION_MS = new Date(LIMITS.send.neverDeletionDate).getTime();
+
+/**
+ * Whether `date` is the never-expires sentinel rather than a real deadline.
+ *
+ * Exported because it is a fact about a Send that callers beyond this
+ * validator will want -- an admin listing, or a cleanup job if one is ever
+ * written, which must skip exactly these rows -- and because a second
+ * `=== '9999-...'` spelled somewhere else is how a sentinel acquires two
+ * spellings that drift.
+ */
+export function isNeverDeletionDate(date: Date): boolean {
+  return date.getTime() === NEVER_DELETION_MS;
+}
+
 export function validateDeletionDate(date: Date): Response | null {
-  const maxMs = Date.now() + LIMITS.send.maxDeletionDays * 24 * 60 * 60 * 1000;
+  // Never is not a date near the ceiling; it is its own value, so it is
+  // answered before the ceiling is consulted. See `LIMITS.send.neverDeletionDate`
+  // for why a sentinel instant and not a nullable column.
+  if (isNeverDeletionDate(date)) {
+    return null;
+  }
+  const maxDays = LIMITS.send.maxDeletionDays;
+  const maxMs = Date.now() + maxDays * 24 * 60 * 60 * 1000;
   if (date.getTime() > maxMs) {
+    // **The number is interpolated, not spelled.** This sentence used to read
+    // "less than 31 days" in prose beside a limit of 31 -- a message that
+    // starts lying the moment the limit moves, and the limit has now moved.
     return errorResponse(
-      'You cannot have a Send with a deletion date that far into the future. Adjust the Deletion Date to a value less than 31 days from now and try again.',
+      `You cannot have a Send with a deletion date that far into the future. Adjust the Deletion Date to a value less than ${maxDays} days from now and try again.`,
       400
     );
   }
