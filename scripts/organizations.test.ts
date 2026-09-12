@@ -10,6 +10,7 @@ import {
 } from '../src/services/storage-organization-repo';
 import { isAllowedSsoRedirectUri } from '../src/utils/origins';
 import { readOrgCipherFields, setOrgCipherFields, isOrgCipher as isOrgCipherAccess } from '../src/services/storage-org-access';
+import { organizationForMember } from '../src/utils/profile-response';
 
 function member(overrides: Record<string, unknown> = {}) {
   return {
@@ -290,4 +291,44 @@ test('organization ciphers never carry personal folder, favorite, or archive sta
   assert.equal(personal.folderId, 'personal-folder-1');
   assert.equal(personal.favorite, true);
   assert.equal(personal.archivedAt, '2026-01-01T00:00:00.000Z');
+});
+
+test('a profile organization carries the member wrapped key, not the org public key', () => {
+  const org = {
+    id: 'org-1',
+    name: 'Engineering',
+    enabled: true,
+    useTotp: false,
+    ownerId: 'user-1',
+    billingEmail: null,
+    publicKey: 'ORG-PUBLIC-KEY',
+    privateKey: 'ORG-PRIVATE-KEY',
+    identifier: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  } as any;
+
+  const seen = organizationForMember(org, member({ encryptedOrgKey: 'WRAPPED-FOR-THIS-MEMBER' }) as any);
+
+  // The defect this test exists for: `key` used to be the organization's
+  // public key, which no member can unwrap. A client following the protocol
+  // would have failed every field of every shared item.
+  assert.equal(seen.key, 'WRAPPED-FOR-THIS-MEMBER');
+  assert.notEqual(seen.key, org.publicKey);
+  // The organization's public key still has its own field.
+  assert.equal(seen.publicKey, 'ORG-PUBLIC-KEY');
+  // And the spelling this server has always sent keeps working, with the
+  // same value, so nothing already reading it breaks.
+  assert.equal(seen.encryptedOrgKey, 'WRAPPED-FOR-THIS-MEMBER');
+
+  // A membership with no wrapped key yields null rather than something
+  // unusable: a client that cannot unwrap should be told so, not handed a
+  // key that will never work.
+  const keyless = organizationForMember(org, member() as any);
+  assert.equal(keyless.key, null);
+  assert.equal(keyless.encryptedOrgKey, null);
+
+  // Only owners and admins are handed the organization's private key.
+  assert.equal(organizationForMember(org, member({ role: 'owner' }) as any).privateKey, 'ORG-PRIVATE-KEY');
+  assert.equal(organizationForMember(org, member({ role: 'member' }) as any).privateKey, null);
 });

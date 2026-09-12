@@ -12,13 +12,56 @@ function toProfileOrganization(org: NonNullable<Awaited<ReturnType<typeof getOrg
     useTotp: org.useTotp,
     ownerId: org.ownerId,
     billingEmail: org.billingEmail,
-    key: org.publicKey,
+    // Null here on purpose, and filled in per member below.
+    //
+    // `key` is the ORGANIZATION'S SYMMETRIC KEY, RSA-wrapped under the
+    // reading member's own public key -- it is the thing a client unwraps
+    // with its private key to read that organization's ciphers, and it is
+    // therefore different for every member. It is not the organization's
+    // public key, which is the separate `publicKey` field below.
+    //
+    // This used to be `org.publicKey`, which is per-organization and could
+    // never be unwrapped by anybody. A client following the protocol would
+    // fail every field of every shared item, and only once its owner had
+    // created their first organization.
+    key: null,
     publicKey: org.publicKey,
     privateKey: org.privateKey,
     identifier: org.identifier,
     creationDate: org.createdAt,
     revisionDate: org.updatedAt,
     object: 'organization',
+  };
+}
+
+/**
+ * One organization as the member reading it sees it.
+ *
+ * Exported and pure so the key invariant below can be tested without a
+ * database: it is the one thing here that silently breaks every shared item
+ * when it is wrong, and it was wrong.
+ */
+export function organizationForMember(
+  org: NonNullable<Awaited<ReturnType<typeof getOrganizationsForUser>>[number]>,
+  membership: { role?: string; permissions?: unknown; encryptedOrgKey?: string | null } | undefined,
+): Record<string, unknown> {
+  const base = toProfileOrganization(org);
+  const role = membership?.role ?? 'member';
+  // The member's own RSA-wrapped copy of the organization's symmetric key,
+  // in the field every Bitwarden client reads it from. `encryptedOrgKey` is
+  // kept beside it rather than instead of it -- that is the spelling this
+  // server has always sent, so anything already reading it keeps working.
+  const wrapped = membership?.encryptedOrgKey ?? null;
+  return {
+    ...base,
+    // Members decrypt with the symmetric org key; only admins get the org
+    // private key.
+    privateKey: role === 'owner' || role === 'admin' ? base.privateKey : null,
+    role,
+    permissions: membership?.permissions ?? {},
+    key: wrapped,
+    encryptedOrgKey: wrapped,
+    users: [],
   };
 }
 
@@ -35,21 +78,7 @@ export async function buildProfileResponse(user: User, env: Env): Promise<Profil
       const memberByOrg = new Map(memberships.map((m) => [m.organizationId, m]));
       organizations = orgs
         .filter((org) => org.enabled)
-        .map((org) => {
-          const base = toProfileOrganization(org);
-          const membership = memberByOrg.get(org.id);
-          const role = membership?.role ?? 'member';
-          return {
-            ...base,
-            // Members decrypt with the symmetric org key below; only admins get
-            // the org private key.
-            privateKey: role === 'owner' || role === 'admin' ? base.privateKey : null,
-            role,
-            permissions: membership?.permissions ?? {},
-            encryptedOrgKey: membership?.encryptedOrgKey ?? null,
-            users: [],
-          };
-        });
+        .map((org) => organizationForMember(org, memberByOrg.get(org.id)));
     } catch (error) {
       console.error('Failed to load organizations for profile:', error);
       organizations = [];
