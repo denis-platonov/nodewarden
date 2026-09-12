@@ -452,6 +452,24 @@ async function runInsertBatch(db: D1Database, table: string, statements: D1Prepa
   }
 }
 
+// The blob store is a flat keyspace shared by attachments (`<cipherId>/<attachmentId>`)
+// and Send files (`sends/<sendId>/<fileId>`). Restore derives the write key from
+// db.json, which is attacker-supplied data inside the uploaded archive, so a row
+// whose cipher_id or id smuggled a slash would aim the write at a key the restore
+// has no business touching -- `cipher_id: "sends"` with `id: "<sendId>/<fileId>"`
+// reconstructs a Send file key exactly. Callers do already reject such rows:
+// validateBackupPayloadContents() runs isSafeBackupPathSegment() over every
+// attachment row before any write, and parseBackupArchive() rejects zip entries
+// that are not exactly two safe segments. But that invariant lives two files away
+// from the putBlobObject() call that depends on it, and the sibling lookup
+// (buildAttachmentBlobLookup) re-checks its own key input rather than trusting the
+// caller. Re-check here too, so the write site is correct on its own terms and a
+// future caller that forgets to validate cannot turn a restore into a blob overwrite.
+export function toSafeAttachmentBlobKey(cipherId: string, attachmentId: string): string | null {
+  const key = getAttachmentObjectKey(cipherId, attachmentId);
+  return isSafeBackupAttachmentBlobName(key) ? key : null;
+}
+
 async function restoreBlobFiles(env: Env, db: BackupPayload['db'], files: Record<string, Uint8Array>): Promise<AttachmentRestoreResult> {
   const restoredAttachments: SqlRow[] = [];
   const skippedItems: BackupImportSkipSummary['items'] = [];
@@ -461,6 +479,15 @@ async function restoreBlobFiles(env: Env, db: BackupPayload['db'], files: Record
     const attachmentId = String(row.id || '').trim();
     if (!cipherId || !attachmentId) continue;
     const key = `attachments/${cipherId}/${attachmentId}.bin`;
+    const blobKey = toSafeAttachmentBlobKey(cipherId, attachmentId);
+    if (!blobKey) {
+      skippedItems.push({
+        kind: 'attachment',
+        path: key,
+        sizeBytes: Number(row.size || 0) || 0,
+      });
+      continue;
+    }
     const bytes = files[key];
     if (!bytes) {
       skippedItems.push({
@@ -471,7 +498,7 @@ async function restoreBlobFiles(env: Env, db: BackupPayload['db'], files: Record
       continue;
     }
     try {
-      await putBlobObject(env, getAttachmentObjectKey(cipherId, attachmentId), bytes, {
+      await putBlobObject(env, blobKey, bytes, {
         size: bytes.byteLength,
         contentType: 'application/octet-stream',
       });
@@ -603,7 +630,10 @@ async function restoreRemoteAttachmentFiles(
     const attachmentId = String(row.id || '').trim();
     const inlinePath = `attachments/${cipherId}/${attachmentId}.bin`;
     const ref = manifestLookup.get(`${cipherId}/${attachmentId}`);
-    if (!ref && !files[inlinePath]) {
+    // See toSafeAttachmentBlobKey: the manifest validates its own blobName, but the
+    // key we write to is rebuilt from the db.json row, so it needs its own check.
+    const blobKey = toSafeAttachmentBlobKey(cipherId, attachmentId);
+    if (!blobKey || (!ref && !files[inlinePath])) {
       skippedItems.push({
         kind: 'attachment',
         path: `attachments/${cipherId}/${attachmentId}`,
@@ -621,7 +651,7 @@ async function restoreRemoteAttachmentFiles(
       continue;
     }
     try {
-      await putBlobObject(env, getAttachmentObjectKey(cipherId, attachmentId), bytes, {
+      await putBlobObject(env, blobKey, bytes, {
         size: bytes.byteLength,
         contentType: 'application/octet-stream',
       });

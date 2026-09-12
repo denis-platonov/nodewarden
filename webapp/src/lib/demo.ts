@@ -20,6 +20,7 @@ import type {
   VaultDraft,
 } from '@/lib/types';
 import { t } from '@/lib/i18n';
+import { SEND_NEVER_DELETION_DATE } from '@shared/send-deletion';
 import { dispatchBackupProgress } from '@/lib/backup-restore-progress';
 
 type Notify = (type: 'success' | 'error' | 'warning', text: string) => void;
@@ -1092,7 +1093,9 @@ function sendFromDraft(draft: SendDraft, current?: Send | null): Send {
     accessCount: current?.accessCount || 0,
     maxAccessCount: draft.maxAccessCount ? Number(draft.maxAccessCount) : null,
     disabled: !!draft.disabled,
-    deletionDate: new Date(Date.now() + deletionDays * 86400_000).toISOString(),
+    deletionDate: draft.deletionNever
+      ? SEND_NEVER_DELETION_DATE
+      : new Date(Date.now() + deletionDays * 86400_000).toISOString(),
     expirationDate: expirationDays > 0 ? new Date(Date.now() + expirationDays * 86400_000).toISOString() : null,
     revisionDate: now,
     shareUrl: current?.shareUrl || (isFile ? '/#/send/demo-file/demo-key' : '/#/send/demo-note/demo-key'),

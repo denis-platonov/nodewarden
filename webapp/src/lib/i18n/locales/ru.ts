@@ -563,6 +563,7 @@ const ru: Record<string, string> = {
   "txt_restored_selected_items": "Восстановлены выбранные элементы",
   "txt_deleted_selected_sends": "Удалены выбранные отправки",
   "txt_deletion_date": "Дата удаления",
+  "txt_send_never_expires": "Никогда",
   "txt_deletion_days": "Дни удаления",
   "txt_device": "Устройство",
   "txt_device_authorization_revoked": "Доверие к устройству отозвано",

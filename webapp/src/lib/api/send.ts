@@ -1,6 +1,7 @@
 import { base64ToBytes, bytesToBase64, decryptBw, decryptBwFileData, decryptStr, encryptBw, encryptBwFileData, hkdf, pbkdf2 } from '../crypto';
 import type { Send, SendDraft, SessionState } from '../types';
 import { chunkArray, createApiError, parseErrorMessage, parseJson, uploadDirectEncryptedPayload, type AuthedFetch } from './shared';
+import { SEND_NEVER_DELETION_DATE } from '@shared/send-deletion';
 
 function toIsoDateFromDays(value: string, required: boolean): string | null {
   const raw = String(value || '').trim();
@@ -16,6 +17,20 @@ function toIsoDateFromDays(value: string, required: boolean): string | null {
   if (!required && n === 0) return null;
   const date = new Date(Date.now() + Math.floor(n) * 24 * 60 * 60 * 1000);
   return date.toISOString();
+}
+
+/**
+ * The `deletionDate` a draft is asking for.
+ *
+ * Never is answered here rather than inside `toIsoDateFromDays` because it is not
+ * a number of days from now -- it is one fixed instant the server recognises, and
+ * routing it through the day arithmetic is what turned "never" into a date the
+ * server refused. Both the create and the update path go through this, so a Send
+ * that never expires stays that way across an edit that does not touch the field.
+ */
+function sendDeletionIso(draft: SendDraft): string {
+  if (draft.deletionNever) return SEND_NEVER_DELETION_DATE;
+  return toIsoDateFromDays(draft.deletionDays, true)!;
 }
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -93,7 +108,7 @@ export async function createSend(
   const nameCipher = await encryptTextValue(draft.name || '', sendKey.enc, sendKey.mac);
   const notesCipher = await encryptTextValue(draft.notes || '', sendKey.enc, sendKey.mac);
 
-  const deletionIso = toIsoDateFromDays(draft.deletionDays, true)!;
+  const deletionIso = sendDeletionIso(draft);
   const expirationIso = toIsoDateFromDays(draft.expirationDays, false);
   const maxAccessCount = parseMaxAccessCountRaw(draft.maxAccessCount);
   const password = String(draft.password || '');
@@ -194,7 +209,7 @@ export async function updateSend(
   const nameCipher = await encryptTextValue(draft.name || '', sendKey.enc, sendKey.mac);
   const notesCipher = await encryptTextValue(draft.notes || '', sendKey.enc, sendKey.mac);
 
-  const deletionIso = toIsoDateFromDays(draft.deletionDays, true)!;
+  const deletionIso = sendDeletionIso(draft);
   const expirationIso = toIsoDateFromDays(draft.expirationDays, false);
   const maxAccessCount = parseMaxAccessCountRaw(draft.maxAccessCount);
 

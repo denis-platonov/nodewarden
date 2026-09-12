@@ -563,6 +563,7 @@ const it: Record<string, string> = {
   "txt_restored_selected_items": "Elementi selezionati ripristinati",
   "txt_deleted_selected_sends": "Invii selezionati eliminati",
   "txt_deletion_date": "Data di eliminazione",
+  "txt_send_never_expires": "Mai",
   "txt_deletion_days": "Giorni all'eliminazione",
   "txt_device": "Dispositivo",
   "txt_device_authorization_revoked": "Autorizzazione dispositivo revocata",

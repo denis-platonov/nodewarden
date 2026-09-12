@@ -566,6 +566,7 @@ const zhCN: Record<string, string> = {
   "txt_restored_selected_items": "已恢复所选项目",
   "txt_deleted_selected_sends": "已删除所选 Send",
   "txt_deletion_date": "删除日期",
+  "txt_send_never_expires": "永不过期",
   "txt_deletion_days": "删除天数",
   "txt_device": "设备",
   "txt_device_authorization_revoked": "设备信任已撤销",

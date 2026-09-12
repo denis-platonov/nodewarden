@@ -307,6 +307,18 @@ export interface SendDraft {
   notes: string;
   text: string;
   file: File | null;
+  /**
+   * Whether this Send is asked to never expire, which is a state of its own and
+   * not a very large `deletionDays`.
+   *
+   * The server spells never as a sentinel instant -- `LIMITS.send.neverDeletionDate`,
+   * in the year 9999 -- and a day count cannot carry it: measured from now the
+   * sentinel is about 2,900,000 days, a number the composer would show the user
+   * verbatim and the server would then refuse for exceeding `maxDeletionDays`.
+   * When this is true `deletionDays` is ignored on the way out and simply holds
+   * the finite value the field falls back to if never is switched off again.
+   */
+  deletionNever: boolean;
   deletionDays: string;
   expirationDays: string;
   maxAccessCount: string;

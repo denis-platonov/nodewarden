@@ -563,6 +563,7 @@ const fi: Record<string, string> = {
   "txt_restored_selected_items": "Palautettiin valitut nimikkeet",
   "txt_deleted_selected_sends": "Poistettiin valitut lähetykset",
   "txt_deletion_date": "Poistopäivä",
+  "txt_send_never_expires": "Ei koskaan",
   "txt_deletion_days": "Poistopäivät",
   "txt_device": "Laite",
   "txt_device_authorization_revoked": "Laitteen luottamus peruutettu",

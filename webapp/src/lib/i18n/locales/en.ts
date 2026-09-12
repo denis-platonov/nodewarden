@@ -616,6 +616,7 @@ const en: Record<string, string> = {
   "txt_restored_selected_items": "Restored selected items",
   "txt_deleted_selected_sends": "Deleted selected sends",
   "txt_deletion_date": "Deletion Date",
+  "txt_send_never_expires": "Never",
   "txt_deletion_days": "Deletion Days",
   "txt_device": "Device",
   "txt_device_authorization_revoked": "Device trust revoked",

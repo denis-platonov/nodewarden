@@ -4,6 +4,7 @@ import { copyTextToClipboard } from '@/lib/clipboard';
 import LoadingState from '@/components/LoadingState';
 import type { Send, SendDraft } from '@/lib/types';
 import { t } from '@/lib/i18n';
+import { SEND_MAX_DELETION_DAYS, isNeverSendDeletionDate } from '@shared/send-deletion';
 
 interface SendsPageProps {
   sends: Send[];
@@ -22,6 +23,12 @@ interface SendsPageProps {
 type SendTypeFilter = 'all' | 'text' | 'file';
 const AUTO_COPY_KEY = 'nodewarden.send.auto_copy_link.v1';
 const MOBILE_LAYOUT_QUERY = '(max-width: 1180px)';
+/**
+ * The deletion day count a Send starts at, and falls back to when it has none to
+ * show -- a new draft, an unreadable date, or a Send that never expires and is
+ * therefore not measured in days at all.
+ */
+const DEFAULT_DELETION_DAYS = 7;
 
 function daysFromNow(iso: string | null | undefined, fallback: number): string {
   if (!iso) return String(fallback);
@@ -39,6 +46,23 @@ function formatSendDate(value: string | null | undefined): string {
   return parsed.toLocaleString();
 }
 
+/**
+ * A deletion date, or "Never" when the Send carries the never-expires sentinel.
+ *
+ * The server stores "does not expire" as a real instant in the year 9999 rather
+ * than a null -- see the comment beside `LIMITS.send.neverDeletionDate` for why
+ * -- and the wire shape hands that instant to us verbatim. Rendering it raw put
+ * "31 Dec 9999" in front of the user, which reads as a bug even though it is the
+ * literal truth. Only the deletion date is ever the sentinel; `expirationDate`
+ * is genuinely nullable and already falls through to the dash, so it keeps using
+ * `formatSendDate`. This asks the shared predicate rather than comparing the
+ * string here, so the webapp cannot drift from what the server means by never.
+ */
+function formatSendDeletionDate(value: string | null | undefined): string {
+  if (isNeverSendDeletionDate(value)) return t('txt_send_never_expires');
+  return formatSendDate(value);
+}
+
 function buildDefaultDraft(): SendDraft {
   return {
     type: 'text',
@@ -46,7 +70,8 @@ function buildDefaultDraft(): SendDraft {
     notes: '',
     text: '',
     file: null,
-    deletionDays: '7',
+    deletionNever: false,
+    deletionDays: String(DEFAULT_DELETION_DAYS),
     expirationDays: '0',
     maxAccessCount: '',
     password: '',
@@ -56,6 +81,7 @@ function buildDefaultDraft(): SendDraft {
 }
 
 function draftFromSend(send: Send): SendDraft {
+  const deletionNever = isNeverSendDeletionDate(send.deletionDate);
   return {
     id: send.id,
     type: Number(send.type) === 1 ? 'file' : 'text',
@@ -63,7 +89,14 @@ function draftFromSend(send: Send): SendDraft {
     notes: send.decNotes || '',
     text: send.decText || '',
     file: null,
-    deletionDays: daysFromNow(send.deletionDate, 7),
+    deletionNever,
+    // A Send that never expires has no day count to open the form with, so the
+    // field takes the default rather than a measurement of the sentinel:
+    // `daysFromNow` would read the year 9999 as ~2,900,000 days, which is both
+    // meaningless on screen and past the server's ceiling on the way back. The
+    // never state above is what round-trips; this is only what the user lands on
+    // if they untick it.
+    deletionDays: deletionNever ? String(DEFAULT_DELETION_DAYS) : daysFromNow(send.deletionDate, DEFAULT_DELETION_DAYS),
     expirationDays: daysFromNow(send.expirationDate, 0),
     maxAccessCount: send.maxAccessCount !== null && send.maxAccessCount !== undefined ? String(send.maxAccessCount) : '',
     password: '',
@@ -469,7 +502,10 @@ export default function SendsPage(props: SendsPageProps) {
               )}
               <label className="field">
                 <span>{t('txt_deletion_days')}</span>
-                <input className="input" type="number" min="1" max="31" value={draft.deletionDays} onInput={(e) => setDraft({ ...draft, deletionDays: (e.currentTarget as HTMLInputElement).value })} />
+                <input className="input" type="number" min="1" max={SEND_MAX_DELETION_DAYS} value={draft.deletionDays} disabled={draft.deletionNever} onInput={(e) => setDraft({ ...draft, deletionDays: (e.currentTarget as HTMLInputElement).value })} />
+                <div className="send-options mt-2">
+                  <label><input type="checkbox" checked={draft.deletionNever} onInput={(e) => setDraft({ ...draft, deletionNever: (e.currentTarget as HTMLInputElement).checked })} /> {t('txt_send_never_expires')}</label>
+                </div>
               </label>
               <label className="field">
                 <span>{t('txt_expiration_days_0_never')}</span>
@@ -544,7 +580,7 @@ export default function SendsPage(props: SendsPageProps) {
             <div className="card stagger-item stagger-delay-2">
               <h4>{t('txt_send_details')}</h4>
               <div className="kv-line"><span>{t('txt_access_count')}</span><strong>{selectedSend.accessCount || 0}</strong></div>
-              <div className="kv-line"><span>{t('txt_deletion_date')}</span><strong>{formatSendDate(selectedSend.deletionDate)}</strong></div>
+              <div className="kv-line"><span>{t('txt_deletion_date')}</span><strong>{formatSendDeletionDate(selectedSend.deletionDate)}</strong></div>
               <div className="kv-line"><span>{t('txt_expiration_date')}</span><strong>{formatSendDate(selectedSend.expirationDate)}</strong></div>
             </div>
 

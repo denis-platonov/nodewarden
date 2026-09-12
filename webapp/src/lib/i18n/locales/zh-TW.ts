@@ -566,6 +566,7 @@ const zhTW: Record<string, string> = {
   "txt_restored_selected_items": "已恢復所選項目",
   "txt_deleted_selected_sends": "已刪除所選 Send",
   "txt_deletion_date": "刪除日期",
+  "txt_send_never_expires": "永不過期",
   "txt_deletion_days": "刪除天數",
   "txt_device": "設備",
   "txt_device_authorization_revoked": "設備信任已撤銷",

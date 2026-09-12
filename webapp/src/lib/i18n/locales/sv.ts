@@ -563,6 +563,7 @@ const sv: Record<string, string> = {
   "txt_restored_selected_items": "Återställde valda objekt",
   "txt_deleted_selected_sends": "Tog bort valda sändningar",
   "txt_deletion_date": "Raderingsdatum",
+  "txt_send_never_expires": "Aldrig",
   "txt_deletion_days": "Raderingsdagar",
   "txt_device": "Enhet",
   "txt_device_authorization_revoked": "Enhetsförtroende återkallat",

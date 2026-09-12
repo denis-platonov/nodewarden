@@ -9,6 +9,7 @@ import { StorageService } from '../services/storage';
 import { jsonResponse, errorResponse } from '../utils/response';
 import { readActingDeviceIdentifier } from '../utils/device';
 import { LIMITS } from '../config/limits';
+import { isNeverSendDeletionDate } from '../../shared/send-deletion';
 
 export const SEND_INACCESSIBLE_MSG = 'Send does not exist or is no longer available';
 const SEND_PASSWORD_ITERATIONS = 100_000;
@@ -321,25 +322,21 @@ export function verifySendPasswordHashB64(send: Send, passwordHashB64: string): 
 }
 
 /**
- * The instant that means "this Send never expires".
- *
- * Parsed once from `LIMITS.send.neverDeletionDate` so the comparison below is
- * numeric and therefore tolerant of how a client spells it: `...999Z` and
- * `...999+00:00` are the same moment and must both count as never.
- */
-const NEVER_DELETION_MS = new Date(LIMITS.send.neverDeletionDate).getTime();
-
-/**
  * Whether `date` is the never-expires sentinel rather than a real deadline.
  *
- * Exported because it is a fact about a Send that callers beyond this
- * validator will want -- an admin listing, or a cleanup job if one is ever
- * written, which must skip exactly these rows -- and because a second
- * `=== '9999-...'` spelled somewhere else is how a sentinel acquires two
- * spellings that drift.
+ * The comparison itself lives in `shared/send-deletion.ts`, because the webapp
+ * needs the same answer to render "Never" on the Sends screen, and a second
+ * `=== '9999-...'` spelled over there is how a sentinel acquires two spellings
+ * that drift. It is numeric rather than textual so that `...999Z` and
+ * `...999+00:00` -- the same moment, differently spelled by different clients --
+ * both count as never.
+ *
+ * Still exported from here because it is a fact about a Send that callers
+ * beyond this validator will want: an admin listing, or a cleanup job if one is
+ * ever written, which must skip exactly these rows.
  */
 export function isNeverDeletionDate(date: Date): boolean {
-  return date.getTime() === NEVER_DELETION_MS;
+  return isNeverSendDeletionDate(date);
 }
 
 export function validateDeletionDate(date: Date): Response | null {

@@ -1,4 +1,6 @@
-﻿export const LIMITS = {
+﻿import { SEND_MAX_DELETION_DAYS, SEND_NEVER_DELETION_DATE } from '../../shared/send-deletion';
+
+export const LIMITS = {
   auth: {
     // Access token lifetime in seconds.
     // 访问令牌有效期（秒）。
@@ -123,7 +125,11 @@
     // has no quota, and it made "keep this link for a quarter" impossible to
     // express. "Forever" is NOT expressed by pushing this number up -- it has
     // its own value, `neverDeletionDate` below.
-    maxDeletionDays: 3653,
+    //
+    // The number itself lives in `shared/send-deletion.ts` because the composer
+    // has to cap its Deletion Days input at the same value the server enforces.
+    // The reasoning stays here; the number has one home.
+    maxDeletionDays: SEND_MAX_DELETION_DAYS,
     // The one deletion date that means "this Send does not expire".
     //
     // A sentinel instant rather than a null column. `deletionDate` is NOT NULL
@@ -140,7 +146,11 @@
     // ISO instant, it round-trips exactly through `new Date(..).toISOString()`,
     // and it sorts last lexicographically among ISO `Z` strings -- which is
     // what the SQL comparison and `idx_sends_user_deletion` actually do.
-    neverDeletionDate: '9999-12-31T23:59:59.999Z',
+    //
+    // The literal itself lives in `shared/send-deletion.ts` because the webapp
+    // needs it too, to render "Never" rather than the year 9999 on the Sends
+    // screen. The reasoning stays here; the string has one home.
+    neverDeletionDate: SEND_NEVER_DELETION_DATE,
   },
   organizations: {
     // Organizations a single account may own. Creating one grants premium
