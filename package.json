@@ -17,6 +17,7 @@
     "i18n:validate": "node scripts/i18n-validate.cjs",
     "test:backup-blob-keys": "tsx --test scripts/backup-blob-keys.test.ts",
     "test:config-compatibility": "tsx --test scripts/config-compatibility.test.ts",
+    "test:notification-pushes": "tsx --test scripts/notification-pushes.test.ts",
     "test:organizations": "tsx --test scripts/organizations.test.ts",
     "test:sso": "tsx --test scripts/sso-id-token.test.ts",
     "test:schema": "tsx --test scripts/storage-schema.test.ts",

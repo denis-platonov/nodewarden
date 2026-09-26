@@ -1,5 +1,5 @@
 import { Env, Attachment, Cipher } from '../types';
-import { notifyUserCipherUpdate, notifyUserVaultSync } from '../durable/notifications-hub';
+import { notifyUserCipherUpdate } from '../durable/notifications-hub';
 import { StorageService } from '../services/storage';
 import { jsonResponse, errorResponse } from '../utils/response';
 import { buildDirectUploadUrl, getSafeJwtSecret, parseDirectUploadPayload } from '../utils/direct-upload';
@@ -24,15 +24,6 @@ import {
   putBlobObject,
 } from '../services/blob-store';
 import { auditRequestMetadata, writeAuditEvent } from '../services/audit-events';
-
-function notifyVaultSyncForRequest(
-  request: Request,
-  env: Env,
-  userId: string,
-  revisionDate: string
-): void {
-  notifyUserVaultSync(env, userId, revisionDate, readActingDeviceIdentifier(request));
-}
 
 function normalizeOptionalId(value: unknown): string | null {
   if (value == null) return null;
@@ -155,7 +146,6 @@ async function processAttachmentUpload(
 
   const revisionInfo = await storage.updateCipherRevisionDate(cipherId);
   if (revisionInfo) {
-    notifyVaultSyncForRequest(request, env, revisionInfo.userId, revisionInfo.revisionDate);
     notifyCipherUpdateForRequest(request, env, cipher, revisionInfo.revisionDate);
   }
   await notifyAttachmentOrgChange(request, env, cipher);
@@ -237,7 +227,6 @@ export async function handleCreateAttachment(
   // Update cipher revision date
   const revisionInfo = await storage.updateCipherRevisionDate(cipherId);
   if (revisionInfo) {
-    notifyVaultSyncForRequest(request, env, revisionInfo.userId, revisionInfo.revisionDate);
     notifyCipherUpdateForRequest(request, env, cipher, revisionInfo.revisionDate);
   }
   await notifyAttachmentOrgChange(request, env, cipher);
@@ -409,7 +398,6 @@ export async function handleUpdateAttachmentMetadata(
   await storage.saveAttachment(attachment);
   const revisionInfo = await storage.updateCipherRevisionDate(cipherId);
   if (revisionInfo) {
-    notifyVaultSyncForRequest(request, env, revisionInfo.userId, revisionInfo.revisionDate);
     notifyCipherUpdateForRequest(request, env, cipher, revisionInfo.revisionDate);
   }
   await notifyAttachmentOrgChange(request, env, cipher);
@@ -514,7 +502,6 @@ export async function handleDeleteAttachment(
   // Update cipher revision date
   const revisionInfo = await storage.updateCipherRevisionDate(cipherId);
   if (revisionInfo) {
-    notifyVaultSyncForRequest(request, env, revisionInfo.userId, revisionInfo.revisionDate);
     notifyCipherUpdateForRequest(request, env, cipher, revisionInfo.revisionDate);
     await writeAttachmentAudit(storage, request, revisionInfo.userId, 'attachment.delete', {
       id: attachmentId,

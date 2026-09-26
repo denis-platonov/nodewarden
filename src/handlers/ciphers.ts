@@ -88,6 +88,13 @@ function buildCipherPermissions(passthrough: Record<string, unknown>): { delete:
   };
 }
 
+// **Only for changes no single-cipher push can describe** -- a bulk move,
+// archive, import or purge. Every Bitwarden client answers this push with a
+// full `GET /api/sync`, so sending it beside a `SyncCipher*` push (as every
+// single-cipher handler here used to) made each connected client download the
+// whole vault for a one-item edit: measured at ~13,600 D1 rows read for one
+// delete with eight clients connected, against one or two for the cipher
+// push alone. The single-cipher handlers send only their own push now.
 function notifyVaultSyncForRequest(
   request: Request,
   env: Env,
@@ -1034,7 +1041,6 @@ export async function handleCreateCipher(request: Request, env: Env, userId: str
 
   await storage.saveCipher(cipher);
   const revisionDate = await storage.updateRevisionDate(userId);
-  notifyVaultSyncForRequest(request, env, userId, revisionDate);
   notifyCipherCreateForRequest(request, env, cipher, revisionDate);
   await notifyOrgCipherChange(request, env, cipher);
   const responseOptions = cipherResponseOptionsForRequest(request);
@@ -1158,7 +1164,6 @@ export async function handleUpdateCipher(request: Request, env: Env, userId: str
   await syncIncomingAttachmentMetadata(storage, cipher.id, cipherData);
   await storage.saveCipher(cipher);
   const revisionDate = await storage.updateRevisionDate(userId);
-  notifyVaultSyncForRequest(request, env, userId, revisionDate);
   notifyCipherUpdateForRequest(request, env, cipher, revisionDate);
   await notifyOrgCipherChange(request, env, cipher);
   const attachments = await storage.getAttachmentsByCipher(cipher.id);
@@ -1184,8 +1189,13 @@ export async function handleDeleteCipher(request: Request, env: Env, userId: str
   syncCipherComputedAliases(cipher);
   await storage.saveCipher(cipher);
   const revisionDate = await storage.updateRevisionDate(userId);
-  notifyVaultSyncForRequest(request, env, userId, revisionDate);
-  notifyCipherDeleteForRequest(request, env, cipher, revisionDate);
+  // A soft delete is an UPDATE -- the cipher still exists, now with a
+  // `deletedDate` -- which is how Bitwarden's own server announces it
+  // (`PushSyncCipherUpdateAsync`). Announced as a delete, a client that
+  // trusts the push drops the item instead of moving it to its trash; the
+  // whole-vault push that used to ride beside it hid that by making every
+  // client refetch everything.
+  notifyCipherUpdateForRequest(request, env, cipher, revisionDate);
   await notifyOrgCipherChange(request, env, cipher);
   await writeCipherAudit(storage, request, userId, 'cipher.delete.soft', {
     id: cipher.id,
@@ -1216,7 +1226,6 @@ export async function handleDeleteCipherCompat(request: Request, env: Env, userI
     // Access resolved above; owner-scoped delete would no-op for a non-author member.
     await storage.deleteCipherById(id);
     const revisionDate = await storage.updateRevisionDate(userId);
-    notifyVaultSyncForRequest(request, env, userId, revisionDate);
     notifyCipherDeleteForRequest(request, env, cipher, revisionDate);
     await notifyOrgCipherChange(request, env, cipher);
     await writeCipherAudit(storage, request, userId, 'cipher.delete.permanent', {
@@ -1247,7 +1256,6 @@ export async function handlePermanentDeleteCipher(request: Request, env: Env, us
   // owner-scoped delete would silently no-op for a non-author member.
   await storage.deleteCipherById(id);
   const revisionDate = await storage.updateRevisionDate(userId);
-  notifyVaultSyncForRequest(request, env, userId, revisionDate);
   notifyCipherDeleteForRequest(request, env, cipher, revisionDate);
   await notifyOrgCipherChange(request, env, cipher);
   await writeCipherAudit(storage, request, userId, 'cipher.delete.permanent', {
@@ -1273,7 +1281,6 @@ export async function handleRestoreCipher(request: Request, env: Env, userId: st
   syncCipherComputedAliases(cipher);
   await storage.saveCipher(cipher);
   const revisionDate = await storage.updateRevisionDate(userId);
-  notifyVaultSyncForRequest(request, env, userId, revisionDate);
   notifyCipherUpdateForRequest(request, env, cipher, revisionDate);
   await notifyOrgCipherChange(request, env, cipher);
 
@@ -1324,7 +1331,6 @@ export async function handlePartialUpdateCipher(request: Request, env: Env, user
 
   await storage.saveCipher(cipher);
   const revisionDate = await storage.updateRevisionDate(userId);
-  notifyVaultSyncForRequest(request, env, userId, revisionDate);
   notifyCipherUpdateForRequest(request, env, cipher, revisionDate);
   await notifyOrgCipherChange(request, env, cipher);
 
@@ -1410,7 +1416,6 @@ export async function handleArchiveCipher(request: Request, env: Env, userId: st
   normalizeCipherForStorage(cipher);
   await storage.saveCipher(cipher);
   const revisionDate = await storage.updateRevisionDate(userId);
-  notifyVaultSyncForRequest(request, env, userId, revisionDate);
   notifyCipherUpdateForRequest(request, env, cipher, revisionDate);
 
   const attachments = await storage.getAttachmentsByCipher(cipher.id);
@@ -1433,7 +1438,7 @@ export async function handleUnarchiveCipher(request: Request, env: Env, userId: 
   normalizeCipherForStorage(cipher);
   await storage.saveCipher(cipher);
   const revisionDate = await storage.updateRevisionDate(userId);
-  notifyVaultSyncForRequest(request, env, userId, revisionDate);
+  notifyCipherUpdateForRequest(request, env, cipher, revisionDate);
 
   const attachments = await storage.getAttachmentsByCipher(cipher.id);
   return jsonResponse(
