@@ -4,6 +4,7 @@ import test from 'node:test';
 import { LIMITS } from '../src/config/limits';
 import {
   handleWebsiteIcon,
+  isInertSvgIcon,
   isPublicIconHost,
   normalizeIconHost,
   resolveDirectIconRedirect,
@@ -17,7 +18,9 @@ const DIRECT_URLS = [
   'https://example.com/favicon.ico',
   'https://example.com/favicon.png',
   'https://example.com/apple-touch-icon.png',
+  'https://example.com/favicon.svg',
 ];
+const SVG_URL = DIRECT_URLS[3];
 const FAVICON_IM_URL = 'https://favicon.im/zh/example.com?larger=true&throw-error-on-404=true';
 const BITWARDEN_URL = 'https://icons.bitwarden.net/example.com/icon.png';
 
@@ -28,6 +31,13 @@ function pngResponse(byteLength = 64, headers: Record<string, string> = {}): Res
     status: 200,
     headers: { 'Content-Type': 'image/png', ...headers },
   });
+}
+
+const SITE_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#c8431f"/></svg>';
+
+function svgResponse(body: string): Response {
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'image/svg+xml' } });
 }
 
 function notFound(): Response {
@@ -85,8 +95,57 @@ test('a 404 on one direct path moves on to the next one, not off the host', asyn
     () => handleWebsiteIcon(env, 'example.com')
   );
 
+  assert.deepEqual(urls, DIRECT_URLS.slice(0, 3));
+  assert.equal(result.status, 200);
+});
+
+test("a site whose only icon is /favicon.svg gets that icon, sandboxed", async () => {
+  // https://23000268.xyz/: `<link rel="icon" href="/favicon.svg">`, and the
+  // raster paths redirect to a login page.
+  const { result, urls } = await withStubbedFetch(
+    (url) => (url === SVG_URL ? svgResponse(SITE_SVG) : notFound()),
+    () => handleWebsiteIcon(env, 'example.com')
+  );
+
   assert.deepEqual(urls, DIRECT_URLS);
   assert.equal(result.status, 200);
+  assert.equal(result.headers.get('Content-Type'), 'image/svg+xml');
+  assert.match(String(result.headers.get('Content-Security-Policy')), /\bsandbox\b/);
+  assert.match(String(result.headers.get('Content-Security-Policy')), /default-src 'none'/);
+  assert.equal(await result.text(), SITE_SVG);
+});
+
+test('an SVG that can do anything but draw is refused', async () => {
+  for (const active of [
+    '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:alert(1)"><rect/></a></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><div/></foreignObject></svg>',
+    '<!doctype html><html><body>not an icon</body></html>',
+  ]) {
+    const { urls } = await withStubbedFetch(
+      (url) => (url === SVG_URL ? svgResponse(active) : notFound()),
+      () => handleWebsiteIcon(env, 'example.com')
+    );
+    assert.deepEqual(urls, [...DIRECT_URLS, FAVICON_IM_URL, BITWARDEN_URL], active);
+  }
+});
+
+test('an SVG is accepted from the site only, never from a third party', async () => {
+  const { result } = await withStubbedFetch(
+    (url) => (url === FAVICON_IM_URL ? svgResponse(SITE_SVG) : notFound()),
+    () => handleWebsiteIcon(env, 'example.com')
+  );
+  assert.notEqual(result.headers.get('Content-Type'), 'image/svg+xml');
+});
+
+test('the inert-SVG rule, by itself', () => {
+  const bytes = (text: string) => new TextEncoder().encode(text).buffer as ArrayBuffer;
+  assert.ok(isInertSvgIcon(bytes(SITE_SVG)));
+  assert.ok(isInertSvgIcon(bytes(`\uFEFF<?xml version="1.0"?>\n<!-- icon -->\n${SITE_SVG}`)));
+  assert.ok(!isInertSvgIcon(bytes('<html><svg></svg></html>')), 'an SVG inside HTML is not an SVG');
+  assert.ok(!isInertSvgIcon(bytes('<svg><script/></svg>')));
+  assert.ok(!isInertSvgIcon(bytes('<svg ONCLICK="x()"></svg>')), 'event handlers are refused in any case');
 });
 
 test('a host that does not answer costs one timeout, not three', async () => {
@@ -313,7 +372,8 @@ test('an upstream error status is not pinned at the edge for a week', async () =
     globalThis.fetch = originalFetch;
   }
 
-  assert.equal(seen.length, 5);
+  // Every direct path, then both third parties.
+  assert.equal(seen.length, DIRECT_URLS.length + 2);
   for (const cf of seen) {
     const byStatus = (cf as any)?.cacheTtlByStatus;
     assert.equal(byStatus['200-299'], LIMITS.cache.iconTtlSeconds);

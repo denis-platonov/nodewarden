@@ -20,6 +20,7 @@ const DIRECT_URLS = [
   'https://example.com/favicon.ico',
   'https://example.com/favicon.png',
   'https://example.com/apple-touch-icon.png',
+  'https://example.com/favicon.svg',
 ];
 const FAVICON_IM_URL = 'https://favicon.im/zh/example.com?larger=true&throw-error-on-404=true';
 const BITWARDEN_URL = 'https://icons.bitwarden.net/example.com/icon.png';

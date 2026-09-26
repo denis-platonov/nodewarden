@@ -30,8 +30,15 @@ const BITWARDEN_DEFAULT_GLOBE_ICON_SHA256 = 'aaa64871332ad5b7d28fe8874efb19c2d9c
 // The list is short on purpose. Each entry is an outbound request, and the
 // thorough way to find a site's declared icon - fetch the page, parse its
 // <link rel="icon"> - means this server fetching somebody's HTML on behalf of
-// a vault entry. Three fixed paths, or nothing.
-const DIRECT_ICON_PATHS = ['favicon.ico', 'favicon.png', 'apple-touch-icon.png'] as const;
+// a vault entry. Fixed paths, or nothing.
+//
+// /favicon.svg is last, and it is the one a site with no raster icon at all
+// has: https://23000268.xyz/ declares only `<link rel="icon" href="/favicon.svg">`
+// and answers the three raster paths with a redirect to its login page, so
+// every vault entry for it showed the placeholder. An SVG is accepted from
+// this path only -- never from a third party -- and only when it is inert;
+// see isInertSvgIcon.
+const DIRECT_ICON_PATHS = ['favicon.ico', 'favicon.png', 'apple-touch-icon.png', 'favicon.svg'] as const;
 
 // Names that are reserved, unresolvable on the public internet, or resolve
 // differently on a private network than they do here. A direct fetch to one
@@ -220,6 +227,33 @@ export function buildThirdPartyIconSources(normalizedHost: string): IconSource[]
   ];
 }
 
+function isSvgMediaType(contentType: string): boolean {
+  return contentType.split(';', 1)[0].trim() === 'image/svg+xml';
+}
+
+/**
+ * Whether an SVG body is an icon and nothing more.
+ *
+ * It must BE an SVG -- an `<svg>` root, optionally after an XML declaration,
+ * comments and a doctype -- so an HTML page labelled image/svg+xml is not
+ * one. And it must carry none of the things that make SVG active: a script
+ * element, an event-handler attribute, a `javascript:` URL, or a
+ * `<foreignObject>`, which embeds HTML.
+ *
+ * This is the second of two walls, not the only one. An icon is served with
+ * `Content-Security-Policy: default-src 'none'; ...; sandbox`, so a script in
+ * it could not run even if someone opened the URL directly on this origin,
+ * and every client draws it through `<img>`, where SVG script never runs. An
+ * icon has no use for any of these, so refusing them costs nothing.
+ */
+export function isInertSvgIcon(bytes: ArrayBuffer): boolean {
+  const text = new TextDecoder('utf-8').decode(bytes);
+  const head = text.replace(/^\uFEFF/, '').trimStart();
+  const root = /^(<\?xml[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*(<!DOCTYPE[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i;
+  if (!root.test(head)) return false;
+  return !/<script|<foreignobject|javascript:|\son[a-z]+\s*=/i.test(text);
+}
+
 function remainingMs(deadlineAt: number): number {
   return deadlineAt - Date.now();
 }
@@ -405,15 +439,20 @@ async function resolveIconFromSources(
     if (!response || !response.ok) continue;
 
     const contentType = String(response.headers.get('Content-Type') || '').toLowerCase();
+    // SVG is active content -- it can carry script -- and the general rule
+    // refuses it. The one exception is the site's own icon, fetched from the
+    // site itself, and its body is checked below before it is served.
+    const svg = source.direct === true && isSvgMediaType(contentType);
     // Also what stops a single-page app that serves index.html for
     // /favicon.ico from becoming this host's icon.
-    if (!isSafeWebsiteIconContentType(contentType)) continue;
+    if (!svg && !isSafeWebsiteIconContentType(contentType)) continue;
 
     const contentLength = getPositiveContentLength(response.headers);
     if (contentLength !== null && contentLength > ICON_MAX_BUFFER_BYTES) continue;
 
     const bytes = await readIconBytes(response, ICON_MAX_BUFFER_BYTES, deadlineAt);
     if (!bytes) continue;
+    if (svg && !isInertSvgIcon(bytes)) continue;
     if (
       source.rejectImage &&
       bytes.byteLength === source.rejectImage.byteLength &&
