@@ -22,7 +22,6 @@ import {
   hasEmailAuth,
   isSendAvailable,
   notifySendUpdateForRequest,
-  notifyVaultSyncForRequest,
   parseStoredSendData,
   resolveSendFromIdOrAccessId,
   sendPasswordLimitKey,
@@ -33,6 +32,22 @@ import {
   verifySendPassword,
   verifySendPasswordHashB64,
 } from './sends-shared';
+
+// A recipient opening a Send moves that Send's access count, and nothing
+// else. It is NOT a vault change, so it bumps no account revision and sends
+// no `SyncVault`: every Bitwarden client answers that push with a whole
+// `GET /api/sync`, and every connected client of the owner used to download
+// the entire vault each time a link was opened. The Send's own update push
+// is what the owner's clients need to refresh their Sends list, and it is
+// all they get. Stamped with the moment of the access, which is what the
+// row's `updated_at` was just set to (to the millisecond, give or take).
+function notifySendAccessedForRequest(
+  request: Request,
+  env: Env,
+  send: { id: string; userId: string }
+): void {
+  notifySendUpdateForRequest(request, env, send.id, send.userId, new Date().toISOString());
+}
 
 function contentDispositionAttachment(fileName: string | null | undefined): string {
   const fallback = 'send-file';
@@ -97,9 +112,7 @@ export async function handleAccessSend(request: Request, env: Env, accessId: str
       return errorResponse(SEND_INACCESSIBLE_MSG, 404);
     }
     send.accessCount += 1;
-    const revisionDate = await storage.updateRevisionDate(send.userId);
-    notifyVaultSyncForRequest(request, env, send.userId, revisionDate);
-    notifySendUpdateForRequest(request, env, send.id, send.userId, revisionDate);
+    notifySendAccessedForRequest(request, env, send);
   }
 
   const creatorIdentifier = await getCreatorIdentifier(storage, send);
@@ -170,9 +183,7 @@ export async function handleAccessSendFile(
     return errorResponse(SEND_INACCESSIBLE_MSG, 404);
   }
   send.accessCount += 1;
-  const revisionDate = await storage.updateRevisionDate(send.userId);
-  notifyVaultSyncForRequest(request, env, send.userId, revisionDate);
-  notifySendUpdateForRequest(request, env, send.id, send.userId, revisionDate);
+  notifySendAccessedForRequest(request, env, send);
 
   const token = await createSendFileDownloadToken(send.id, fileId, secret);
   const url = new URL(request.url);
@@ -211,9 +222,7 @@ export async function handleAccessSendV2(request: Request, env: Env): Promise<Re
       return errorResponse(SEND_INACCESSIBLE_MSG, 404);
     }
     send.accessCount += 1;
-    const revisionDate = await storage.updateRevisionDate(send.userId);
-    notifyVaultSyncForRequest(request, env, send.userId, revisionDate);
-    notifySendUpdateForRequest(request, env, send.id, send.userId, revisionDate);
+    notifySendAccessedForRequest(request, env, send);
   }
 
   const creatorIdentifier = await getCreatorIdentifier(storage, send);
@@ -251,9 +260,7 @@ export async function handleAccessSendFileV2(request: Request, env: Env, fileId:
     return errorResponse(SEND_INACCESSIBLE_MSG, 404);
   }
   send.accessCount += 1;
-  const revisionDate = await storage.updateRevisionDate(send.userId);
-  notifyVaultSyncForRequest(request, env, send.userId, revisionDate);
-  notifySendUpdateForRequest(request, env, send.id, send.userId, revisionDate);
+  notifySendAccessedForRequest(request, env, send);
 
   const downloadToken = await createSendFileDownloadToken(send.id, fileId, jwt.secret);
   const url = new URL(request.url);

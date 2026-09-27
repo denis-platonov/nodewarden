@@ -81,3 +81,46 @@ test('a bulk change still sends the whole-vault push, because no single cipher d
     assert.ok(body(ciphers, name).includes(VAULT_SYNC), `${name} no longer announces anything`);
   }
 });
+
+// A recipient opening a Send changes that Send's access count and nothing in
+// the owner's vault. It used to bump the account revision AND send SyncVault,
+// so every one of the owner's connected clients downloaded the whole vault
+// each time a link was opened -- ~1,700 D1 rows per client per open.
+const publicSends = bodies('src/handlers/sends-public.ts');
+const privateSends = bodies('src/handlers/sends-private.ts');
+const SEND_ACCESSED = 'notifySendAccessedForRequest(';
+
+test('opening a Send pushes only the Send update: no revision bump, no whole-vault push', () => {
+  for (const name of [
+    'handleAccessSend',
+    'handleAccessSendFile',
+    'handleAccessSendV2',
+    'handleAccessSendFileV2',
+  ]) {
+    const text = body(publicSends, name);
+    assert.ok(text.includes(SEND_ACCESSED), `${name} no longer tells the owner's clients the Send was opened`);
+    assert.ok(!text.includes(VAULT_SYNC), `${name} sends a whole-vault push for an access`);
+    assert.ok(!text.includes('updateRevisionDate('), `${name} bumps the account revision for an access`);
+  }
+  // The helper itself, and the whole file: an access path added later must
+  // not bring the vault push back by another route.
+  const whole = readFileSync(new URL('../src/handlers/sends-public.ts', import.meta.url), 'utf8');
+  assert.ok(!whole.includes(VAULT_SYNC), 'sends-public.ts sends a whole-vault push somewhere');
+  assert.ok(!whole.includes('updateRevisionDate('), 'sends-public.ts bumps the account revision somewhere');
+  const helper = whole.slice(whole.indexOf('function notifySendAccessedForRequest('));
+  assert.ok(
+    helper.slice(0, helper.indexOf('\n}')).includes('notifySendUpdateForRequest('),
+    'the access helper does not send the Send update push'
+  );
+});
+
+test("the owner's own Send changes still bump the revision, as before", () => {
+  // CONTROL: the rule above is about a stranger opening a link, not about the
+  // owner creating, editing or deleting a Send, which this change leaves alone.
+  for (const name of ['handleCreateSend', 'handleUpdateSend', 'handleDeleteSend']) {
+    assert.ok(
+      body(privateSends, name).includes('updateRevisionDate('),
+      `${name} stopped bumping the revision, which this change was not meant to touch`
+    );
+  }
+});
